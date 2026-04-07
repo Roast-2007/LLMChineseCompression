@@ -67,7 +67,7 @@ def compress(
     on_progress=None,
     use_priors: bool = True,
     max_order: int = DEFAULT_MAX_ORDER,
-    use_phrases: bool = True,
+    use_phrases: bool = False,
 ) -> bytes:
     """Compress text to .ztxt format."""
     if not text:
@@ -81,16 +81,28 @@ def compress(
 
     enc_kwargs: dict = {"priors": priors or None, "max_order": max_order}
 
-    # Build phrase table (offline mode only, text must be long enough)
+    # Build phrase table (offline mode only, text must be long enough).
+    # Only use phrases if the estimated savings exceed the table overhead.
     phrase_table_bytes = b""
     phrase_set: frozenset[str] = frozenset()
-    if use_phrases and mode == "offline" and len(text) >= 50:
+    if use_phrases and mode == "offline" and len(text) >= 200:
         from .predictor.phrases import PhraseTable, build_phrase_table
-        pt = build_phrase_table(text)
+        pt = build_phrase_table(text, min_freq=4)
         if pt.phrases:
-            phrase_set = frozenset(pt.phrases)
-            phrase_table_bytes = pt.serialize()
-            flags |= FLAG_PHRASE_ENCODING
+            table_bytes = pt.serialize()
+            # Estimate savings: each phrase match saves roughly
+            # (phrase_len - 1) * avg_bits_per_char / 8 bytes.
+            # Only include phrases if table cost < estimated savings.
+            est_savings = sum(
+                (len(p) - 1) * 1.0  # ~1 byte per extra char saved
+                for p in pt.phrases
+                for i in range(len(text) - len(p) + 1)
+                if text[i:i + len(p)] == p
+            )
+            if est_savings > len(table_bytes) * 2:
+                phrase_set = frozenset(pt.phrases)
+                phrase_table_bytes = table_bytes
+                flags |= FLAG_PHRASE_ENCODING
 
     if mode == "codegen" and api_client is not None:
         # Code generation mode: LLM identifies code-representable segments

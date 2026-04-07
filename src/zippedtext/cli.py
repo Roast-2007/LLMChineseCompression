@@ -52,7 +52,7 @@ main.add_command(config_group)
 @click.option("--base-url", default=None, help="API base URL (overrides config)")
 @click.option("--max-order", type=click.IntRange(4, 6), default=4, help="PPM context depth (4-6, default: 4)")
 @click.option("--no-priors", is_flag=True, default=False, help="Disable Chinese frequency priors")
-@click.option("--no-phrases", is_flag=True, default=False, help="Disable phrase-level encoding")
+@click.option("--phrases", is_flag=True, default=False, help="Enable phrase-level encoding (experimental)")
 def c(
     input_file: str,
     output: str | None,
@@ -63,7 +63,7 @@ def c(
     base_url: str | None,
     max_order: int,
     no_priors: bool,
-    no_phrases: bool,
+    phrases: bool,
 ) -> None:
     """Compress a text file."""
     output = output or (input_file + ".ztxt")
@@ -104,7 +104,7 @@ def c(
         on_progress=on_progress,
         use_priors=not no_priors,
         max_order=max_order,
-        use_phrases=not no_phrases,
+        use_phrases=phrases,
     )
     elapsed = time.perf_counter() - t0
     click.echo()

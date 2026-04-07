@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zippedtext"
+version = "0.1.0"
+description = "LLM-enhanced lossless text compression for Chinese/English/digits"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+keywords = ["compression", "text", "chinese", "lossless", "arithmetic-coding", "ppm", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Archiving :: Compression",
+    "Topic :: Text Processing",
+]
+dependencies = [
+    "openai>=1.0",
+    "click>=8.0",
+    "tqdm",
+    "zstandard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+zippedtext = "zippedtext.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-username/zippedtext"
+Repository = "https://github.com/your-username/zippedtext"
+Issues = "https://github.com/your-username/zippedtext/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zippedtext"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

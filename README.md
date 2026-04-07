@@ -2,7 +2,9 @@
 
 LLM 增强的无损中英文纯文本压缩工具。
 
-基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 DeepSeek API 后可进一步提升。
+基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 LLM API 后可进一步提升。
+
+**v0.3.0 新增**：中文字符频率先验、短语级编码、代码生成模式（实验性）、多平台 API 支持（SiliconFlow 硅基流动等）、交互式配置系统。
 
 ## 压缩效果
 
@@ -12,16 +14,19 @@ LLM 增强的无损中英文纯文本压缩工具。
 | 中英混合 2,622 字 | 4,925 B | 2,954 B (0.60) | 2,903 B (0.59) | **2,640 B (0.54)** | — |
 | 重复文本 200 字 | 600 B | — | — | **32 B (0.05)** | — |
 
-> 括号内为压缩比（越小越好）。online 模式需要 DeepSeek API Key。
+> 括号内为压缩比（越小越好）。v0.3.0 的短语级编码和频率先验可进一步改善离线模式压缩率。
 
 ## 工作原理
 
-1. **自适应 PPM 预测器**：维护多阶（order-0 到 order-4）字符级 n-gram 模型，在编码/解码过程中实时学习文本的统计规律。
-2. **逃逸编码动态词汇**：无需预定义字符集。新字符首次出现时通过 `ESCAPE + Unicode codepoint` 编码，此后直接用自适应模型高效编码。
-3. **32 位整数算术编码**：将预测概率转化为极致紧凑的比特流，数学上保证无损。
-4. **LLM 在线增强**（v0.2.0 新增）：接入 DeepSeek API 生成文本续写预测，利用 LLM 的语言知识增强字符概率分布，进一步压缩。支持两种子模式：
+1. **自适应 PPM 预测器**：维护多阶（order-0 到 order-6 可配置）字符级 n-gram 模型，在编码/解码过程中实时学习文本的统计规律。
+2. **中文字符频率先验**（v0.3.0）：预置 top-3000 中文字符频率表作为 warm start，显著改善短文本压缩。
+3. **短语级编码**（v0.3.0）：自动识别高频短语（2-8 字符），将其作为单一符号编码。
+4. **逃逸编码动态词汇**：无需预定义字符集。新字符首次出现时通过 `ESCAPE + Unicode codepoint` 编码，此后直接用自适应模型高效编码。
+5. **32 位整数算术编码**：将预测概率转化为极致紧凑的比特流，数学上保证无损。
+6. **LLM 在线增强**（v0.2.0）：接入 LLM API 生成文本续写预测，利用 LLM 的语言知识增强字符概率分布。支持两种子模式：
    - **char**（默认）：字符级预测增强，LLM 预测准确时大幅降低编码位数
    - **token**（实验性）：token 级匹配编码，匹配的 token 几乎零成本编码
+7. **代码生成模式**（v0.3.0，实验性）：LLM 识别可用 Python 表达式表示的文本片段，将这些片段存储为代码而非压缩数据。
 
 ## 安装
 
@@ -43,35 +48,42 @@ pip install -e ".[dev]"
 
 - Python >= 3.12
 - [click](https://click.palletsprojects.com/) — CLI 框架
-- [openai](https://github.com/openai/openai-python) — DeepSeek API 客户端（OpenAI 兼容）
+- [openai](https://github.com/openai/openai-python) — API 客户端（OpenAI 协议兼容）
 - [tqdm](https://github.com/tqdm/tqdm) — 进度条
 - [zstandard](https://github.com/indygreg/python-zstandard) — zstd 压缩
 
 ## 快速开始
 
-### 压缩文件（离线模式）
+### 配置 API（可选）
 
 ```bash
-zippedtext c input.txt -o output.ztxt
+# 交互式配置向导 — 引导选择平台、输入密钥、选择模型
+zippedtext config init
 ```
 
-### 压缩文件（在线模式 — 需要 API Key）
+### 压缩文件
 
 ```bash
-# 字符级在线模式（默认子模式）
+# 离线模式（默认，无需网络）
+zippedtext c input.txt -o output.ztxt
+
+# 在线模式 — 使用已配置的 API
+zippedtext c input.txt -o output.ztxt --mode online
+
+# 在线模式 — 直接指定 API Key
 zippedtext c input.txt -o output.ztxt --mode online --api-key sk-your-key
 
-# token 级在线模式（实验性）
-zippedtext c input.txt -o output.ztxt --mode online --sub-mode token --api-key sk-your-key
+# 代码生成模式（实验性，需要 API）
+zippedtext c input.txt -o output.ztxt --mode codegen --api-key sk-your-key
 ```
 
 ### 解压文件
 
 ```bash
-# 离线模式文件 — 无需 API Key
+# 离线模式文件
 zippedtext d output.ztxt -o restored.txt
 
-# 在线模式文件 — 需要 API Key（用于重现相同的 LLM 预测）
+# 在线/codegen 模式文件（需要 API 访问）
 zippedtext d output.ztxt -o restored.txt --api-key sk-your-key
 ```
 
@@ -81,121 +93,175 @@ zippedtext d output.ztxt -o restored.txt --api-key sk-your-key
 zippedtext info output.ztxt
 ```
 
-输出示例：
-```
-File: output.ztxt
-  Size:           679 bytes
-  Mode:           offline
-  Model:          deepseek-chat
-  Token count:    462
-  Original size:  1,248 bytes
-  CRC32:          0x55971be1
-  Model data:     0 bytes
-  Compressed body:655 bytes
-  Ratio:          0.544
-```
-
 ### 基准测试
 
 ```bash
-# 仅离线模式
 zippedtext bench input.txt
-
-# 包含在线模式（需要 API Key）
-zippedtext bench input.txt --api-key sk-your-key
+zippedtext bench input.txt --api-key sk-your-key  # 含在线模式
 ```
 
-## 配置 DeepSeek API
+## CLI 命令参考
 
-接入 DeepSeek API 可在压缩时利用 LLM 的语言预测能力，进一步提升压缩率。
+### `zippedtext c` — 压缩
 
-### 1. 获取 API Key
+```
+参数:
+  INPUT_FILE                输入文本文件
 
-访问 [DeepSeek 开放平台](https://platform.deepseek.com/) 注册并创建 API Key。
+选项:
+  -o, --output PATH         输出 .ztxt 文件路径
+  --mode [offline|online|codegen]  压缩模式（默认: offline）
+  --sub-mode [char|token]   在线子模式（默认: char）
+  --model TEXT              模型名称（覆盖配置）
+  --api-key TEXT            API Key（覆盖配置/环境变量）
+  --base-url TEXT           API 地址（覆盖配置）
+  --max-order [4|5|6]       PPM 上下文深度（默认: 4）
+  --no-priors               禁用中文频率先验
+  --no-phrases              禁用短语级编码
+```
 
-### 2. 设置环境变量
+### `zippedtext d` — 解压
 
-**Linux / macOS：**
+```
+参数:
+  INPUT_FILE                输入 .ztxt 文件
+
+选项:
+  -o, --output PATH         输出文本文件路径
+  --api-key TEXT            API Key（在线模式文件需要）
+  --base-url TEXT           API 地址
+```
+
+### `zippedtext info` — 文件信息
+
+```
+参数:
+  INPUT_FILE                .ztxt 文件路径
+```
+
+### `zippedtext bench` — 基准测试
+
+```
+参数:
+  INPUT_FILE                输入文本文件
+
+选项:
+  --api-key TEXT            API Key（可选，启用在线模式对比）
+  --base-url TEXT           API 地址
+  --model TEXT              模型名称
+```
+
+### `zippedtext config` — 配置管理
+
 ```bash
-export DEEPSEEK_API_KEY="sk-your-api-key-here"
+# 交互式配置向导
+zippedtext config init
+
+# 查看当前配置
+zippedtext config show
+
+# 设置单个配置项
+zippedtext config set model deepseek-chat
+zippedtext config set base_url https://api.siliconflow.cn/v1
+zippedtext config set api_key sk-your-key
+
+# 获取可用模型列表
+zippedtext config models
 ```
 
-**Windows (PowerShell)：**
-```powershell
-$env:DEEPSEEK_API_KEY = "sk-your-api-key-here"
-```
+配置文件位置：`~/.zippedtext/config.json`
 
-**Windows (CMD)：**
-```cmd
-set DEEPSEEK_API_KEY=sk-your-api-key-here
-```
+配置优先级：CLI 参数 > 环境变量 > 配置文件 > 默认值
 
-也可以创建 `.env` 文件（不会被 git 追踪）：
-```
-DEEPSEEK_API_KEY=sk-your-api-key-here
-```
+支持的环境变量：`ZIPPEDTEXT_API_KEY`、`DEEPSEEK_API_KEY`、`SILICONFLOW_API_KEY`、`OPENAI_API_KEY`
 
-### 3. 使用 LLM 增强压缩
+## 多平台 API 支持
+
+v0.3.0 支持任何 OpenAI 协议兼容的 API 平台：
+
+| 平台 | Base URL | 说明 |
+|------|----------|------|
+| DeepSeek | `https://api.deepseek.com` | 默认平台 |
+| SiliconFlow 硅基流动 | `https://api.siliconflow.cn/v1` | 国内平台，模型丰富 |
+| OpenAI | `https://api.openai.com/v1` | GPT 系列模型 |
+| 自定义 | 任意 URL | 任何 OpenAI 协议兼容 API |
+
+### 使用 SiliconFlow 示例
 
 ```bash
-# 通过环境变量
-zippedtext c input.txt -o output.ztxt --mode online
+# 方法 1：交互式配置
+zippedtext config init
+# 选择 "SiliconFlow 硅基流动" → 输入 API Key → 选择模型
 
-# 通过命令行参数
-zippedtext c input.txt --api-key sk-your-key --mode online
+# 方法 2：手动配置
+zippedtext config set base_url https://api.siliconflow.cn/v1
+zippedtext config set api_key your-siliconflow-key
+zippedtext config models  # 查看可用模型并选择
 
-# 使用 token 级子模式（实验性）
-zippedtext c input.txt --mode online --sub-mode token
-
-# 切换模型（默认 deepseek-chat）
-zippedtext c input.txt --mode online --model deepseek-reasoner
+# 方法 3：命令行直接指定
+zippedtext c input.txt --mode online \
+  --base-url https://api.siliconflow.cn/v1 \
+  --api-key your-key \
+  --model Qwen/Qwen2.5-7B-Instruct
 ```
-
-> **注意**：不配置 API Key 也完全可以使用。离线模式（默认）不需要任何网络连接，已经优于 gzip/zstd。
-
-### 在线模式说明
-
-- **压缩和解压都需要 API 访问**：在线模式的解压需要调用相同的 API 重现 LLM 预测
-- **API 确定性**：使用 `temperature=0` + `seed=42` 保证编码/解码的预测完全一致
-- **API 费用**：每次压缩/解压约消耗数十次 API 调用，请关注费用
-- **当前限制**：受 Chat API `logprobs` 精度限制，在线模式相比离线约提升 2-5%。未来版本通过本地模型推理可大幅提升
 
 ## Python API
 
 ```python
 from zippedtext.compressor import compress, decompress
 
-# 离线压缩
+# 离线压缩（默认启用频率先验 + 短语编码）
 text = "深度学习是人工智能的核心技术。"
 data = compress(text)
+restored = decompress(data)
+assert restored == text
 
-# 在线压缩（需要 API Key）
-from zippedtext.api_client import DeepSeekClient
-client = DeepSeekClient(api_key="sk-your-key")
+# 自定义选项
+data = compress(text, use_priors=False, use_phrases=False, max_order=5)
+
+# 在线压缩（任何 OpenAI 协议兼容 API）
+from zippedtext.api_client import ApiClient
+client = ApiClient(
+    api_key="sk-your-key",
+    model="deepseek-chat",
+    base_url="https://api.deepseek.com",
+)
 data = compress(text, mode="online", api_client=client, sub_mode="char")
+restored = decompress(data, api_client=client)
 
-# 解压
-restored = decompress(data)  # 离线文件
-restored = decompress(data, api_client=client)  # 在线文件
-assert restored == text  # 无损保证
+# 代码生成模式（实验性）
+data = compress(text, mode="codegen", api_client=client)
+restored = decompress(data)  # codegen 解压不需要 API
+
+# 配置系统
+from zippedtext.config import resolve_config, save_config, AppConfig
+cfg = resolve_config(cli_api_key="sk-...", cli_model="deepseek-chat")
 ```
 
 ## 文件格式 (.ztxt)
+
+### v2 格式（v0.3.0 起，32 字节 header）
 
 ```
 Offset  Size    Field
 ──────  ────    ─────
 0       4       Magic number (b'ZTXT')
-4       1       Format version (0x01)
-5       1       Mode (0x00=online, 0x01=offline)
-6       2       Model ID
+4       1       Format version (0x02)
+5       1       Mode (0x00=online, 0x01=offline, 0x02=codegen)
+6       1       Flags (bit0: phrases, bit1: priors)
+7       1       Max PPM order (4/5/6)
 8       4       Token count
 12      4       Original byte length (UTF-8)
 16      4       CRC32 checksum
-20      4       Model data length (0 for offline, >0 for online)
-24      var     Model data (online: sub-mode byte + model name)
-24+N    var     Compressed body (arithmetic coded bitstream)
+20      4       Model data length
+24      4       Phrase table length
+28      4       Reserved
+32+     var     Model data
+32+M    var     Phrase table
+32+M+P  var     Compressed body
 ```
+
+> v1 格式（v0.1.0-v0.2.0）仍可正常解压，向后兼容。
 
 ## 项目结构
 
@@ -203,50 +269,28 @@ Offset  Size    Field
 src/zippedtext/
 ├── __init__.py             # 版本号
 ├── __main__.py             # python -m zippedtext 入口
-├── cli.py                  # CLI 命令 (compress/decompress/info/bench)
-├── compressor.py           # 压缩/解压核心逻辑
+├── cli.py                  # CLI 命令定义
+├── cli_config.py           # config 子命令组 (v0.3.0)
+├── config.py               # 配置系统 (v0.3.0)
+├── provider.py             # API 平台预设 (v0.3.0)
+├── compressor.py           # 压缩/解压编排器
+├── encoder.py              # 编码逻辑 (v0.3.0 拆分)
+├── decoder.py              # 解码逻辑 (v0.3.0 拆分)
+├── cdf_utils.py            # CDF 工具 (v0.3.0)
+├── codegen.py              # 代码生成模式 (v0.3.0)
 ├── arithmetic.py           # 32-bit 整数算术编码器/解码器
 ├── bitstream.py            # 比特流读写
-├── format.py               # .ztxt 二进制文件格式
-├── api_client.py           # DeepSeek API 客户端
+├── format.py               # .ztxt 二进制格式 (v1 + v2)
+├── api_client.py           # API 客户端（OpenAI 协议兼容）
 ├── tokenizer.py            # 字符级分词器
 └── predictor/
     ├── base.py             # 预测器抽象基类
     ├── adaptive.py         # 自适应 PPM 预测器（核心）
-    ├── llm.py              # LLM 在线预测器 (v0.2.0)
+    ├── priors.py           # 中文字符频率先验 (v0.3.0)
+    ├── phrases.py          # 短语级编码 (v0.3.0)
+    ├── llm.py              # LLM 在线预测器
     └── ngram.py            # N-gram 预测器
 ```
-
-## 技术细节
-
-### 算术编码
-
-使用 Witten-Neal-Cleary 风格的 32 位整数算术编码。概率分布被量化为整数累积分布函数（CDF），保证：
-- 每个符号频率 >= 1（防止零概率）
-- CDF 总和精确等于 2^32
-- 相同输入总是产生相同输出（确定性）
-
-### 自适应预测
-
-PPM 预测器维护 order-0（unigram）到 order-4 的上下文模型：
-- 高阶上下文匹配时给予更高权重
-- 通过观测次数自动调整各阶权重
-- 编码器和解码器执行完全相同的更新步骤，保证同步
-
-### LLM 在线增强 (v0.2.0)
-
-在线模式通过 DeepSeek API 获取文本续写预测，利用 LLM 的语言知识增强编码：
-
-- **字符级 (char)**：每 20 个字符调用一次 API 获取续写预测，对预测正确的字符大幅提升概率（20x boost），自动在预测偏离后停止增强（stop-on-mismatch），避免错误预测造成编码膨胀
-- **token 级 (token)**：匹配 API 生成的 token 与实际文本，匹配的 token 通过 logprobs CDF 高效编码，不匹配时回退到字符级 PPM
-
-### 逃逸编码
-
-字符首次出现时的编码策略：
-- 编码 ESCAPE 符号（自适应概率）
-- 编码字符所在范围（ASCII / CJK / 其他）— 3 选 1
-- 编码范围内偏移量（均匀分布）
-- CJK 字符首次编码约 17 bits，此后仅需约 8-12 bits
 
 ## 运行测试
 
@@ -260,6 +304,9 @@ pytest tests/test_arithmetic.py tests/test_roundtrip.py
 # 在线模式 mock 测试
 pytest tests/test_online.py
 
+# v0.3.0 新增测试
+pytest tests/test_format_v2.py tests/test_config.py tests/test_phrases.py tests/test_codegen.py
+
 # 在线模式集成测试（需要 API Key）
 DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 ```
@@ -267,14 +314,32 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 ## 路线图
 
 - [x] ~~接入 DeepSeek API logprobs 实现 online 模式~~ (v0.2.0)
-- [ ] 预置中文字符频率表（改善短文本压缩）
-- [ ] 短语级编码（高频短语作为单一符号）
+- [x] ~~预置中文字符频率表~~ (v0.3.0)
+- [x] ~~短语级编码~~ (v0.3.0)
+- [x] ~~多平台 API 支持（SiliconFlow 等）~~ (v0.3.0)
+- [x] ~~代码生成模式（实验性）~~ (v0.3.0)
+- [x] ~~交互式配置系统~~ (v0.3.0)
+- [x] ~~order-5/order-6 支持~~ (v0.3.0)
 - [ ] Rust 核心加速（PyO3 绑定）
 - [ ] 本地模型推理（大幅提升在线模式压缩率）
 - [ ] 流式压缩/解压（支持大文件）
 - [ ] 命令行自动补全
+- [ ] PyPI 发布
 
 ## 更新日志
+
+### v0.3.0 — 压缩率优化 + 多平台支持 + 代码生成模式
+
+- **压缩率优化**：
+  - 预置 top-3000 中文字符频率表作为 PPM 先验，改善短文本压缩
+  - 短语级编码：自动识别高频短语（2-8 字符）作为单一符号
+  - 支持 order-5/order-6 PPM 上下文（`--max-order 5`）
+- **代码生成模式**（实验性）：`--mode codegen`，LLM 识别可用代码表示的文本片段
+- **多平台 API 支持**：支持 DeepSeek、SiliconFlow 硅基流动、OpenAI 及任何 OpenAI 协议兼容 API
+- **交互式配置系统**：`zippedtext config init/show/set/models`，本地持久化配置
+- **.ztxt 格式 v2**：32 字节 header，支持 flags、phrase table、任意模型名；向后兼容 v1
+- **代码重构**：compressor.py 拆分为 encoder.py + decoder.py + cdf_utils.py；DeepSeekClient 重命名为 ApiClient
+- 新增测试：test_format_v2.py、test_config.py、test_phrases.py、test_codegen.py
 
 ### v0.2.0 — DeepSeek API 在线模式
 

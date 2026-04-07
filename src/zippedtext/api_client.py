@@ -38,8 +38,8 @@ class ChunkResult:
     model: str
 
 
-class DeepSeekClient:
-    """Wraps the DeepSeek API (OpenAI-compatible) for logprobs retrieval."""
+class ApiClient:
+    """Wraps any OpenAI-compatible API for logprobs retrieval."""
 
     MAX_RETRIES = 3
     RETRY_BASE_DELAY = 1.0  # seconds
@@ -196,6 +196,19 @@ class DeepSeekClient:
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         return json.loads(raw)
 
+    def list_models(self) -> list[str]:
+        """Fetch available model IDs from the API provider.
+
+        Uses the standard ``GET /v1/models`` endpoint supported by
+        OpenAI-compatible APIs.
+        """
+        try:
+            response = self._client.models.list()
+            ids = sorted(m.id for m in response.data)
+            return ids
+        except Exception:
+            return []
+
     def _build_continuation_messages(self, context: str) -> list[dict]:
         """Build messages for text continuation with logprobs."""
         if context:
@@ -226,3 +239,7 @@ class DeepSeekClient:
     # Keep legacy alias for backwards compatibility
     def _build_messages(self, context: str, expected_len: int) -> list[dict]:
         return self._build_continuation_messages(context)
+
+
+# Backward-compatible alias
+DeepSeekClient = ApiClient

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 
@@ -10,7 +9,9 @@ import click
 
 from . import __version__
 from .compressor import compress, decompress
+from .config import resolve_config
 from .format import (
+    MODE_CODEGEN,
     MODE_OFFLINE,
     MODE_ONLINE,
     MODEL_DEEPSEEK_CHAT,
@@ -25,14 +26,20 @@ def main() -> None:
     """ZippedText — LLM-enhanced lossless text compression."""
 
 
+# Register config subcommand group
+from .cli_config import config as config_group  # noqa: E402
+
+main.add_command(config_group)
+
+
 @main.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("-o", "--output", default=None, help="Output .ztxt file path")
 @click.option(
     "--mode",
-    type=click.Choice(["online", "offline"]),
+    type=click.Choice(["online", "offline", "codegen"]),
     default="offline",
-    help="Compression mode (default: offline)",
+    help="Compression mode (default: offline, codegen: experimental)",
 )
 @click.option(
     "--sub-mode",
@@ -40,17 +47,23 @@ def main() -> None:
     default="char",
     help="Online sub-mode: char (default) or token (experimental)",
 )
-@click.option("--model", default="deepseek-chat", help="DeepSeek model name")
-@click.option("--api-key", envvar="DEEPSEEK_API_KEY", default=None, help="DeepSeek API key")
-@click.option("--base-url", default="https://api.deepseek.com", help="DeepSeek API base URL")
+@click.option("--model", default=None, help="Model name (overrides config)")
+@click.option("--api-key", default=None, help="API key (overrides config/env)")
+@click.option("--base-url", default=None, help="API base URL (overrides config)")
+@click.option("--max-order", type=click.IntRange(4, 6), default=4, help="PPM context depth (4-6, default: 4)")
+@click.option("--no-priors", is_flag=True, default=False, help="Disable Chinese frequency priors")
+@click.option("--no-phrases", is_flag=True, default=False, help="Disable phrase-level encoding")
 def c(
     input_file: str,
     output: str | None,
     mode: str,
     sub_mode: str,
-    model: str,
+    model: str | None,
     api_key: str | None,
-    base_url: str,
+    base_url: str | None,
+    max_order: int,
+    no_priors: bool,
+    no_phrases: bool,
 ) -> None:
     """Compress a text file."""
     output = output or (input_file + ".ztxt")
@@ -60,15 +73,21 @@ def c(
         click.echo("Error: input file is empty", err=True)
         sys.exit(1)
 
-    if mode == "online" and not api_key:
-        click.echo("Error: online mode requires --api-key or DEEPSEEK_API_KEY", err=True)
+    cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url, cli_model=model)
+
+    if mode in ("online", "codegen") and not cfg.api_key:
+        click.echo(
+            f"Error: {mode} mode requires an API key.\n"
+            "  Set via --api-key, env var, or run: zippedtext config init",
+            err=True,
+        )
         sys.exit(1)
 
-    api_client = _make_api_client(api_key, model, base_url)
+    api_client = _make_api_client(cfg)
 
     original_size = len(text.encode("utf-8"))
     click.echo(f"Compressing {input_file} ({original_size:,} bytes, {len(text):,} chars)")
-    click.echo(f"Mode: {mode} | Sub-mode: {sub_mode} | Model: {model}")
+    click.echo(f"Mode: {mode} | Sub-mode: {sub_mode} | Model: {cfg.model}")
 
     t0 = time.perf_counter()
 
@@ -80,9 +99,12 @@ def c(
         text,
         mode=mode,
         api_client=api_client,
-        model_name=model,
+        model_name=cfg.model,
         sub_mode=sub_mode,
         on_progress=on_progress,
+        use_priors=not no_priors,
+        max_order=max_order,
+        use_phrases=not no_phrases,
     )
     elapsed = time.perf_counter() - t0
     click.echo()
@@ -100,13 +122,13 @@ def c(
 @main.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("-o", "--output", default=None, help="Output text file path")
-@click.option("--api-key", envvar="DEEPSEEK_API_KEY", default=None, help="DeepSeek API key (for online mode files)")
-@click.option("--base-url", default="https://api.deepseek.com", help="DeepSeek API base URL")
+@click.option("--api-key", default=None, help="API key (overrides config/env)")
+@click.option("--base-url", default=None, help="API base URL (overrides config)")
 def d(
     input_file: str,
     output: str | None,
     api_key: str | None,
-    base_url: str,
+    base_url: str | None,
 ) -> None:
     """Decompress a .ztxt file."""
     if output is None:
@@ -118,19 +140,33 @@ def d(
     with open(input_file, "rb") as f:
         data = f.read()
 
-    # Check if this is an online file and warn early about API key
-    header, _, _ = read_file(data)
-    if header.mode == MODE_ONLINE and not api_key:
+    header, model_data, _ = read_file(data)
+    cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url)
+
+    if header.mode == MODE_ONLINE and not cfg.api_key:
         click.echo(
-            "Error: this file was compressed in online mode. "
-            "Provide --api-key or DEEPSEEK_API_KEY to decompress.",
+            "Error: this file was compressed in online mode.\n"
+            "  Provide --api-key, set env var, or run: zippedtext config init",
             err=True,
         )
         sys.exit(1)
 
-    api_client = _make_api_client(api_key, "deepseek-chat", base_url)
+    # Warn if model mismatch
+    if header.mode == MODE_ONLINE and model_data:
+        from .compressor import _unpack_online_model_data
+        _, file_model = _unpack_online_model_data(model_data)
+        if file_model and file_model != cfg.model:
+            click.echo(
+                f"Warning: file was compressed with model '{file_model}', "
+                f"current config uses '{cfg.model}'. Using file's model.",
+                err=True,
+            )
+            cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url, cli_model=file_model)
 
-    mode_str = "online" if header.mode == MODE_ONLINE else "offline"
+    api_client = _make_api_client(cfg)
+
+    mode_map = {MODE_ONLINE: "online", MODE_OFFLINE: "offline", MODE_CODEGEN: "codegen"}
+    mode_str = mode_map.get(header.mode, "unknown")
     click.echo(f"Decompressing {input_file} ({len(data):,} bytes, mode: {mode_str})")
 
     t0 = time.perf_counter()
@@ -159,14 +195,16 @@ def info(input_file: str) -> None:
         data = f.read()
 
     header, model_data, body = read_file(data)
-    mode_str = "online" if header.mode == MODE_ONLINE else "offline"
+    mode_map = {MODE_ONLINE: "online", MODE_OFFLINE: "offline", MODE_CODEGEN: "codegen"}
+    mode_str = mode_map.get(header.mode, f"unknown({header.mode})")
     model_names = {MODEL_DEEPSEEK_CHAT: "deepseek-chat", MODEL_DEEPSEEK_REASONER: "deepseek-reasoner"}
-    model_str = model_names.get(header.model_id, f"unknown({header.model_id})")
+    model_str = model_names.get(header.model_id, "(see model data)") if header.model_id else "(v2 format)"
 
     click.echo(f"File: {input_file}")
     click.echo(f"  Size:           {len(data):,} bytes")
     click.echo(f"  Mode:           {mode_str}")
     click.echo(f"  Model:          {model_str}")
+    click.echo(f"  Max order:      {header.max_order}")
     click.echo(f"  Token count:    {header.token_count:,}")
     click.echo(f"  Original size:  {header.original_bytes:,} bytes")
     click.echo(f"  CRC32:          {header.crc32:#010x}")
@@ -175,6 +213,16 @@ def info(input_file: str) -> None:
     if header.original_bytes > 0:
         ratio = len(data) / header.original_bytes
         click.echo(f"  Ratio:          {ratio:.3f}")
+
+    # v2 flags
+    from .format import FLAG_PHRASE_ENCODING, FLAG_HAS_PRIORS
+    flags_parts = []
+    if header.flags & FLAG_PHRASE_ENCODING:
+        flags_parts.append("phrases")
+    if header.flags & FLAG_HAS_PRIORS:
+        flags_parts.append("priors")
+    if flags_parts:
+        click.echo(f"  Flags:          {', '.join(flags_parts)}")
 
     # Online mode extra info
     if header.mode == MODE_ONLINE and model_data:
@@ -188,12 +236,14 @@ def info(input_file: str) -> None:
 
 @main.command()
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("--api-key", envvar="DEEPSEEK_API_KEY", default=None)
-@click.option("--base-url", default="https://api.deepseek.com")
-@click.option("--model", default="deepseek-chat")
-def bench(input_file: str, api_key: str | None, base_url: str, model: str) -> None:
+@click.option("--api-key", default=None, help="API key")
+@click.option("--base-url", default=None, help="API base URL")
+@click.option("--model", default=None, help="Model name")
+def bench(input_file: str, api_key: str | None, base_url: str | None, model: str | None) -> None:
     """Benchmark compression on a text file, comparing modes and baselines."""
     import gzip
+
+    cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url, cli_model=model)
 
     text = _read_text(input_file)
     text_bytes = text.encode("utf-8")
@@ -217,17 +267,15 @@ def bench(input_file: str, api_key: str | None, base_url: str, model: str) -> No
     click.echo(f"  {'zippedtext offline':<30} {len(offline):>8,} {len(offline)/original:>8.3f}  ({t_offline:.2f}s)")
 
     # Online mode with API (if available)
-    api_client = _make_api_client(api_key, model, base_url)
+    api_client = _make_api_client(cfg)
     if api_client:
-        # Character-level online
         t0 = time.perf_counter()
-        online_char = compress(text, mode="online", api_client=api_client, model_name=model, sub_mode="char")
+        online_char = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="char")
         t_char = time.perf_counter() - t0
         click.echo(f"  {'zippedtext online (char)':<30} {len(online_char):>8,} {len(online_char)/original:>8.3f}  ({t_char:.2f}s)")
 
-        # Token-level online
         t0 = time.perf_counter()
-        online_token = compress(text, mode="online", api_client=api_client, model_name=model, sub_mode="token")
+        online_token = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="token")
         t_token = time.perf_counter() - t0
         click.echo(f"  {'zippedtext online (token)':<30} {len(online_token):>8,} {len(online_token)/original:>8.3f}  ({t_token:.2f}s)")
     else:
@@ -240,8 +288,9 @@ def _read_text(path: str) -> str:
         return f.read().decode("utf-8")
 
 
-def _make_api_client(api_key: str | None, model: str, base_url: str):
-    if not api_key:
+def _make_api_client(cfg):
+    """Create an API client from resolved config, or None if no key."""
+    if not cfg.api_key:
         return None
-    from .api_client import DeepSeekClient
-    return DeepSeekClient(api_key=api_key, model=model, base_url=base_url)
+    from .api_client import ApiClient
+    return ApiClient(api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url)

@@ -34,6 +34,12 @@ def main() -> None:
     default="offline",
     help="Compression mode (default: offline)",
 )
+@click.option(
+    "--sub-mode",
+    type=click.Choice(["char", "token"]),
+    default="char",
+    help="Online sub-mode: char (default) or token (experimental)",
+)
 @click.option("--model", default="deepseek-chat", help="DeepSeek model name")
 @click.option("--api-key", envvar="DEEPSEEK_API_KEY", default=None, help="DeepSeek API key")
 @click.option("--base-url", default="https://api.deepseek.com", help="DeepSeek API base URL")
@@ -41,6 +47,7 @@ def c(
     input_file: str,
     output: str | None,
     mode: str,
+    sub_mode: str,
     model: str,
     api_key: str | None,
     base_url: str,
@@ -53,11 +60,15 @@ def c(
         click.echo("Error: input file is empty", err=True)
         sys.exit(1)
 
+    if mode == "online" and not api_key:
+        click.echo("Error: online mode requires --api-key or DEEPSEEK_API_KEY", err=True)
+        sys.exit(1)
+
     api_client = _make_api_client(api_key, model, base_url)
 
     original_size = len(text.encode("utf-8"))
     click.echo(f"Compressing {input_file} ({original_size:,} bytes, {len(text):,} chars)")
-    click.echo(f"Mode: {mode} | Model: {model}")
+    click.echo(f"Mode: {mode} | Sub-mode: {sub_mode} | Model: {model}")
 
     t0 = time.perf_counter()
 
@@ -65,7 +76,14 @@ def c(
         pct = current * 100 // total
         click.echo(f"\r  [{pct:3d}%] {current}/{total} chars", nl=False)
 
-    data = compress(text, mode=mode, api_client=api_client, model_name=model, on_progress=on_progress)
+    data = compress(
+        text,
+        mode=mode,
+        api_client=api_client,
+        model_name=model,
+        sub_mode=sub_mode,
+        on_progress=on_progress,
+    )
     elapsed = time.perf_counter() - t0
     click.echo()
 
@@ -100,7 +118,20 @@ def d(
     with open(input_file, "rb") as f:
         data = f.read()
 
-    click.echo(f"Decompressing {input_file} ({len(data):,} bytes)")
+    # Check if this is an online file and warn early about API key
+    header, _, _ = read_file(data)
+    if header.mode == MODE_ONLINE and not api_key:
+        click.echo(
+            "Error: this file was compressed in online mode. "
+            "Provide --api-key or DEEPSEEK_API_KEY to decompress.",
+            err=True,
+        )
+        sys.exit(1)
+
+    api_client = _make_api_client(api_key, "deepseek-chat", base_url)
+
+    mode_str = "online" if header.mode == MODE_ONLINE else "offline"
+    click.echo(f"Decompressing {input_file} ({len(data):,} bytes, mode: {mode_str})")
 
     t0 = time.perf_counter()
 
@@ -108,7 +139,7 @@ def d(
         pct = current * 100 // total
         click.echo(f"\r  [{pct:3d}%] {current}/{total} tokens", nl=False)
 
-    text = decompress(data, on_progress=on_progress)
+    text = decompress(data, api_client=api_client, on_progress=on_progress)
     elapsed = time.perf_counter() - t0
     click.echo()
 
@@ -145,6 +176,15 @@ def info(input_file: str) -> None:
         ratio = len(data) / header.original_bytes
         click.echo(f"  Ratio:          {ratio:.3f}")
 
+    # Online mode extra info
+    if header.mode == MODE_ONLINE and model_data:
+        from .compressor import _unpack_online_model_data, SUB_MODE_TOKEN
+        sub_mode, api_model = _unpack_online_model_data(model_data)
+        sub_str = "token" if sub_mode == SUB_MODE_TOKEN else "char"
+        click.echo(f"  Sub-mode:       {sub_str}")
+        if api_model:
+            click.echo(f"  API model:      {api_model}")
+
 
 @main.command()
 @click.argument("input_file", type=click.Path(exists=True))
@@ -154,7 +194,6 @@ def info(input_file: str) -> None:
 def bench(input_file: str, api_key: str | None, base_url: str, model: str) -> None:
     """Benchmark compression on a text file, comparing modes and baselines."""
     import gzip
-    import zlib
 
     text = _read_text(input_file)
     text_bytes = text.encode("utf-8")
@@ -165,27 +204,35 @@ def bench(input_file: str, api_key: str | None, base_url: str, model: str) -> No
     # Baselines
     gz = gzip.compress(text_bytes, compresslevel=9)
     zs = __import__("zstandard").ZstdCompressor(level=19).compress(text_bytes)
-    click.echo(f"  {'Method':<25} {'Size':>8} {'Ratio':>8}")
-    click.echo(f"  {'─'*25} {'─'*8} {'─'*8}")
-    click.echo(f"  {'Raw UTF-8':<25} {original:>8,} {'1.000':>8}")
-    click.echo(f"  {'gzip -9':<25} {len(gz):>8,} {len(gz)/original:>8.3f}")
-    click.echo(f"  {'zstd -19':<25} {len(zs):>8,} {len(zs)/original:>8.3f}")
+    click.echo(f"  {'Method':<30} {'Size':>8} {'Ratio':>8}")
+    click.echo(f"  {'─'*30} {'─'*8} {'─'*8}")
+    click.echo(f"  {'Raw UTF-8':<30} {original:>8,} {'1.000':>8}")
+    click.echo(f"  {'gzip -9':<30} {len(gz):>8,} {len(gz)/original:>8.3f}")
+    click.echo(f"  {'zstd -19':<30} {len(zs):>8,} {len(zs)/original:>8.3f}")
 
     # Offline mode (no API)
     t0 = time.perf_counter()
     offline = compress(text, mode="offline")
     t_offline = time.perf_counter() - t0
-    click.echo(f"  {'zippedtext offline':<25} {len(offline):>8,} {len(offline)/original:>8.3f}  ({t_offline:.2f}s)")
+    click.echo(f"  {'zippedtext offline':<30} {len(offline):>8,} {len(offline)/original:>8.3f}  ({t_offline:.2f}s)")
 
     # Online mode with API (if available)
     api_client = _make_api_client(api_key, model, base_url)
     if api_client:
+        # Character-level online
         t0 = time.perf_counter()
-        online = compress(text, mode="online", api_client=api_client, model_name=model)
-        t_online = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (LLM)':<25} {len(online):>8,} {len(online)/original:>8.3f}  ({t_online:.2f}s)")
+        online_char = compress(text, mode="online", api_client=api_client, model_name=model, sub_mode="char")
+        t_char = time.perf_counter() - t0
+        click.echo(f"  {'zippedtext online (char)':<30} {len(online_char):>8,} {len(online_char)/original:>8.3f}  ({t_char:.2f}s)")
+
+        # Token-level online
+        t0 = time.perf_counter()
+        online_token = compress(text, mode="online", api_client=api_client, model_name=model, sub_mode="token")
+        t_token = time.perf_counter() - t0
+        click.echo(f"  {'zippedtext online (token)':<30} {len(online_token):>8,} {len(online_token)/original:>8.3f}  ({t_token:.2f}s)")
     else:
-        click.echo(f"  {'zippedtext online (LLM)':<25} {'(no API key)':>8}")
+        click.echo(f"  {'zippedtext online (char)':<30} {'(no API key)':>8}")
+        click.echo(f"  {'zippedtext online (token)':<30} {'(no API key)':>8}")
 
 
 def _read_text(path: str) -> str:

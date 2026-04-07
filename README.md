@@ -6,20 +6,22 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 ## 压缩效果
 
-| 文本类型 | 原始 UTF-8 | gzip -9 | zstd -19 | **zippedtext** |
-|---------|-----------|---------|----------|---------------|
-| 中文 462 字 | 1,248 B | 781 B (0.63) | 785 B (0.63) | **679 B (0.54)** |
-| 中英混合 2,622 字 | 4,925 B | 2,954 B (0.60) | 2,903 B (0.59) | **2,640 B (0.54)** |
-| 重复文本 200 字 | 600 B | — | — | **32 B (0.05)** |
+| 文本类型 | 原始 UTF-8 | gzip -9 | zstd -19 | **offline** | **online (char)** |
+|---------|-----------|---------|----------|-------------|-------------------|
+| 中文 462 字 | 1,248 B | 781 B (0.63) | 785 B (0.63) | **679 B (0.54)** | **661 B (0.53)** |
+| 中英混合 2,622 字 | 4,925 B | 2,954 B (0.60) | 2,903 B (0.59) | **2,640 B (0.54)** | — |
+| 重复文本 200 字 | 600 B | — | — | **32 B (0.05)** | — |
 
-> 括号内为压缩比（越小越好）。
+> 括号内为压缩比（越小越好）。online 模式需要 DeepSeek API Key。
 
 ## 工作原理
 
 1. **自适应 PPM 预测器**：维护多阶（order-0 到 order-4）字符级 n-gram 模型，在编码/解码过程中实时学习文本的统计规律。
 2. **逃逸编码动态词汇**：无需预定义字符集。新字符首次出现时通过 `ESCAPE + Unicode codepoint` 编码，此后直接用自适应模型高效编码。
 3. **32 位整数算术编码**：将预测概率转化为极致紧凑的比特流，数学上保证无损。
-4. **LLM 增强**（可选）：接入 DeepSeek API 获取 logprobs，为算术编码提供更精准的概率分布，进一步压缩。
+4. **LLM 在线增强**（v0.2.0 新增）：接入 DeepSeek API 生成文本续写预测，利用 LLM 的语言知识增强字符概率分布，进一步压缩。支持两种子模式：
+   - **char**（默认）：字符级预测增强，LLM 预测准确时大幅降低编码位数
+   - **token**（实验性）：token 级匹配编码，匹配的 token 几乎零成本编码
 
 ## 安装
 
@@ -47,16 +49,30 @@ pip install -e ".[dev]"
 
 ## 快速开始
 
-### 压缩文件
+### 压缩文件（离线模式）
 
 ```bash
 zippedtext c input.txt -o output.ztxt
 ```
 
+### 压缩文件（在线模式 — 需要 API Key）
+
+```bash
+# 字符级在线模式（默认子模式）
+zippedtext c input.txt -o output.ztxt --mode online --api-key sk-your-key
+
+# token 级在线模式（实验性）
+zippedtext c input.txt -o output.ztxt --mode online --sub-mode token --api-key sk-your-key
+```
+
 ### 解压文件
 
 ```bash
+# 离线模式文件 — 无需 API Key
 zippedtext d output.ztxt -o restored.txt
+
+# 在线模式文件 — 需要 API Key（用于重现相同的 LLM 预测）
+zippedtext d output.ztxt -o restored.txt --api-key sk-your-key
 ```
 
 ### 查看压缩文件信息
@@ -82,23 +98,14 @@ File: output.ztxt
 ### 基准测试
 
 ```bash
+# 仅离线模式
 zippedtext bench input.txt
+
+# 包含在线模式（需要 API Key）
+zippedtext bench input.txt --api-key sk-your-key
 ```
 
-与 gzip、zstd 等算法对比压缩率：
-```
-Benchmarking: input.txt
-  Text: 462 chars, 1,248 bytes (UTF-8)
-
-  Method                        Size    Ratio
-  ───────────────────────── ──────── ────────
-  Raw UTF-8                    1,248    1.000
-  gzip -9                        781    0.626
-  zstd -19                       785    0.629
-  zippedtext offline             679    0.544
-```
-
-## 配置 DeepSeek API（可选）
+## 配置 DeepSeek API
 
 接入 DeepSeek API 可在压缩时利用 LLM 的语言预测能力，进一步提升压缩率。
 
@@ -137,23 +144,39 @@ zippedtext c input.txt -o output.ztxt --mode online
 # 通过命令行参数
 zippedtext c input.txt --api-key sk-your-key --mode online
 
+# 使用 token 级子模式（实验性）
+zippedtext c input.txt --mode online --sub-mode token
+
 # 切换模型（默认 deepseek-chat）
 zippedtext c input.txt --mode online --model deepseek-reasoner
 ```
 
 > **注意**：不配置 API Key 也完全可以使用。离线模式（默认）不需要任何网络连接，已经优于 gzip/zstd。
 
+### 在线模式说明
+
+- **压缩和解压都需要 API 访问**：在线模式的解压需要调用相同的 API 重现 LLM 预测
+- **API 确定性**：使用 `temperature=0` + `seed=42` 保证编码/解码的预测完全一致
+- **API 费用**：每次压缩/解压约消耗数十次 API 调用，请关注费用
+- **当前限制**：受 Chat API `logprobs` 精度限制，在线模式相比离线约提升 2-5%。未来版本通过本地模型推理可大幅提升
+
 ## Python API
 
 ```python
 from zippedtext.compressor import compress, decompress
 
-# 压缩
+# 离线压缩
 text = "深度学习是人工智能的核心技术。"
 data = compress(text)
 
+# 在线压缩（需要 API Key）
+from zippedtext.api_client import DeepSeekClient
+client = DeepSeekClient(api_key="sk-your-key")
+data = compress(text, mode="online", api_client=client, sub_mode="char")
+
 # 解压
-restored = decompress(data)
+restored = decompress(data)  # 离线文件
+restored = decompress(data, api_client=client)  # 在线文件
 assert restored == text  # 无损保证
 ```
 
@@ -169,8 +192,9 @@ Offset  Size    Field
 8       4       Token count
 12      4       Original byte length (UTF-8)
 16      4       CRC32 checksum
-20      4       Model data length (0 for adaptive mode)
-24      var     Compressed body (arithmetic coded bitstream)
+20      4       Model data length (0 for offline, >0 for online)
+24      var     Model data (online: sub-mode byte + model name)
+24+N    var     Compressed body (arithmetic coded bitstream)
 ```
 
 ## 项目结构
@@ -189,6 +213,7 @@ src/zippedtext/
 └── predictor/
     ├── base.py             # 预测器抽象基类
     ├── adaptive.py         # 自适应 PPM 预测器（核心）
+    ├── llm.py              # LLM 在线预测器 (v0.2.0)
     └── ngram.py            # N-gram 预测器
 ```
 
@@ -208,6 +233,13 @@ PPM 预测器维护 order-0（unigram）到 order-4 的上下文模型：
 - 通过观测次数自动调整各阶权重
 - 编码器和解码器执行完全相同的更新步骤，保证同步
 
+### LLM 在线增强 (v0.2.0)
+
+在线模式通过 DeepSeek API 获取文本续写预测，利用 LLM 的语言知识增强编码：
+
+- **字符级 (char)**：每 20 个字符调用一次 API 获取续写预测，对预测正确的字符大幅提升概率（20x boost），自动在预测偏离后停止增强（stop-on-mismatch），避免错误预测造成编码膨胀
+- **token 级 (token)**：匹配 API 生成的 token 与实际文本，匹配的 token 通过 logprobs CDF 高效编码，不匹配时回退到字符级 PPM
+
 ### 逃逸编码
 
 字符首次出现时的编码策略：
@@ -219,24 +251,48 @@ PPM 预测器维护 order-0（unigram）到 order-4 的上下文模型：
 ## 运行测试
 
 ```bash
-# 算术编码单元测试
-python tests/test_arithmetic.py
-
-# 端到端无损测试
-python tests/test_roundtrip.py
-
-# 使用 pytest
-pip install pytest
+# 全部测试
 pytest tests/
+
+# 仅离线模式测试
+pytest tests/test_arithmetic.py tests/test_roundtrip.py
+
+# 在线模式 mock 测试
+pytest tests/test_online.py
+
+# 在线模式集成测试（需要 API Key）
+DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 ```
 
 ## 路线图
 
-- [ ] 接入 DeepSeek API logprobs 实现 online 模式的逐 token 算术编码
-- [ ] Rust 核心加速（PyO3 绑定）
-- [ ] 流式压缩/解压（支持大文件）
+- [x] ~~接入 DeepSeek API logprobs 实现 online 模式~~ (v0.2.0)
 - [ ] 预置中文字符频率表（改善短文本压缩）
+- [ ] 短语级编码（高频短语作为单一符号）
+- [ ] Rust 核心加速（PyO3 绑定）
+- [ ] 本地模型推理（大幅提升在线模式压缩率）
+- [ ] 流式压缩/解压（支持大文件）
 - [ ] 命令行自动补全
+
+## 更新日志
+
+### v0.2.0 — DeepSeek API 在线模式
+
+- 新增 `--mode online` 在线压缩模式，接入 DeepSeek Chat API
+- 支持两种子模式：`--sub-mode char`（默认）和 `--sub-mode token`（实验性）
+- 字符级模式：LLM 预测增强 + stop-on-mismatch 策略
+- token 级模式：API token 匹配编码 + 字符级回退
+- API 客户端：自动重试、模型版本追踪、确定性生成
+- 新增在线模式 mock 测试和集成测试
+- bench 命令支持在线模式对比
+
+### v0.1.0 — 初始版本
+
+- 自适应 PPM + 32 位算术编码
+- 逃逸编码动态词汇
+- .ztxt 二进制格式 v1
+- CLI: compress / decompress / info / bench
+- 离线模式中文压缩率 0.54，优于 gzip/zstd
 
 ## License
 

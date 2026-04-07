@@ -74,10 +74,14 @@ LLMChineseCompression/
 │       ├── base.py                # Predictor 抽象基类
 │       ├── adaptive.py            # ★ 核心：自适应 PPM 预测器
 │       │                          #   动态词汇 + 逃逸编码 + order-4 上下文
+│       ├── llm.py                 # ★ LLM 在线预测器 (v0.2.0)
+│       │                          #   LlmCharPredictor + LlmTokenPredictor
 │       └── ngram.py               # N-gram 预测器（备用/离线增强）
 └── tests/
     ├── test_arithmetic.py         # 算术编码单元测试
     ├── test_roundtrip.py          # 端到端无损测试
+    ├── test_online.py             # 在线模式 mock 单元测试 (v0.2.0)
+    ├── test_online_integration.py # 在线模式 API 集成测试 (v0.2.0)
     ├── sample_cn.txt              # 中文测试语料（462 字）
     └── sample_large.txt           # 中英混合测试语料（2622 字）
 ```
@@ -268,18 +272,24 @@ pytest tests/ -v
 
 ## 6. 路线图
 
-### v0.2.0 — DeepSeek API 在线模式
+### v0.2.0 — DeepSeek API 在线模式 ✅ (已完成)
 
-- [ ] 实现 online 模式的逐 token 算术编码
-  - 使用 DeepSeek Chat API 的 `logprobs` + `top_logprobs` 参数
-  - 每个 token 位置获取 top-20 logprobs，构建概率分布
-  - 剩余概率质量均匀分配给 top-20 以外的 token
-  - 分块处理：生成一段文本，匹配前缀长度，复用有效 logprobs
-- [ ] 处理 API 确定性问题
-  - `temperature=0` 固定生成
-  - 存储模型版本号和 API 调用参数到 header
-  - 解压时验证 logprobs 一致性
-- [ ] 在线模式的压缩率基准：目标中文 ratio < 0.35
+- [x] 实现 online 模式压缩/解压
+  - 字符级子模式 (`--sub-mode char`，默认)：LLM 预测增强 PPM 概率分布
+  - token 级子模式 (`--sub-mode token`，实验性)：API token 匹配 + 字符级回退
+  - 分块处理：每 20 字符调用一次 API，获取续写预测
+  - stop-on-mismatch 策略：预测偏离后自动停止增强，避免编码膨胀
+- [x] 处理 API 确定性问题
+  - `temperature=0` + `seed=42` 固定生成
+  - 存储模型名称和子模式到 model_data 区段
+  - 解压时需要 API 访问以重现相同预测
+- [x] 在线模式压缩率：中文 ratio 0.53（对比离线 0.54，提升 ~2%）
+  - 注：受 Chat API logprobs 精度限制（temperature=0 下概率完全peaked），提升幅度有限
+  - 未来通过本地模型推理（v0.4.0+）可实现 ratio < 0.35 的目标
+- [x] 新增 API 客户端 `generate_continuation()` 方法、自动重试、模型版本追踪
+- [x] 新增 `predictor/llm.py`：`LlmCharPredictor` 和 `LlmTokenPredictor`
+- [x] 新增测试：`test_online.py`（mock 单元测试）、`test_online_integration.py`（真实 API 测试）
+- [x] CLI 新增 `--sub-mode` 选项，`bench` 命令支持在线模式对比
 
 ### v0.3.0 — 压缩率优化
 

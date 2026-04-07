@@ -40,3 +40,7 @@ tests/tmp.*
 
 # uv
 uv.lock
+
+# Docs build artifacts
+docs/_build/
+docs/.doctrees/

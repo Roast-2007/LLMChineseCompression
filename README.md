@@ -1,4 +1,4 @@
-# ZippedText
+# LLMChineseCompression
 
 LLM 增强的无损中英文纯文本压缩工具。
 
@@ -26,8 +26,8 @@ LLM 增强的无损中英文纯文本压缩工具。
 ### 从源码安装
 
 ```bash
-git clone https://github.com/your-username/zippedtext.git
-cd zippedtext
+git clone https://github.com/Roast-2007/LLMChineseCompression.git
+cd LLMChineseCompression
 pip install .
 ```
 

@@ -39,9 +39,9 @@ dev = [
 zippedtext = "zippedtext.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-username/zippedtext"
-Repository = "https://github.com/your-username/zippedtext"
-Issues = "https://github.com/your-username/zippedtext/issues"
+Homepage = "https://github.com/Roast-2007/LLMChineseCompression"
+Repository = "https://github.com/Roast-2007/LLMChineseCompression"
+Issues = "https://github.com/Roast-2007/LLMChineseCompression/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zippedtext"]

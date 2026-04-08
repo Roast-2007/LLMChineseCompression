@@ -8,7 +8,14 @@ import time
 import click
 
 from . import __version__
-from .compressor import SUB_MODE_TOKEN, _unpack_online_model_data, compress, decompress
+from .compressor import (
+    SUB_MODE_TOKEN,
+    _get_priors,
+    _structured_online_compress,
+    _unpack_online_model_data,
+    compress,
+    decompress,
+)
 from .config import resolve_config
 from .format import (
     MODE_CODEGEN,
@@ -18,7 +25,10 @@ from .format import (
     SECTION_PHRASE_TABLE,
     SECTION_SEGMENTS,
     SECTION_STATS,
+    SECTION_TEMPLATES,
     VERSION_V3,
+    V3Section,
+    compute_crc32,
     read_file,
     read_file_v3,
 )
@@ -206,18 +216,18 @@ def info(input_file: str) -> None:
     mode_str = mode_map.get(header.mode, f"unknown({header.mode})")
 
     click.echo(f"File: {input_file}")
-    click.echo(f"  Size:           {len(data):,} bytes")
-    click.echo(f"  Version:        v{header.version}")
-    click.echo(f"  Mode:           {mode_str}")
-    click.echo(f"  Max order:      {header.max_order}")
-    click.echo(f"  Token count:    {header.token_count:,}")
-    click.echo(f"  Original size:  {header.original_bytes:,} bytes")
-    click.echo(f"  CRC32:          {header.crc32:#010x}")
-    click.echo(f"  Model data:     {header.model_data_len:,} bytes")
-    click.echo(f"  Compressed body:{len(body):,} bytes")
+    click.echo(f"  Size:             {len(data):,} bytes")
+    click.echo(f"  Version:          v{header.version}")
+    click.echo(f"  Mode:             {mode_str}")
+    click.echo(f"  Max order:        {header.max_order}")
+    click.echo(f"  Token count:      {header.token_count:,}")
+    click.echo(f"  Original size:    {header.original_bytes:,} bytes")
+    click.echo(f"  CRC32:            {header.crc32:#010x}")
+    click.echo(f"  Model data:       {header.model_data_len:,} bytes")
+    click.echo(f"  Compressed body:  {len(body):,} bytes")
     if header.original_bytes > 0:
         ratio = len(data) / header.original_bytes
-        click.echo(f"  Ratio:          {ratio:.3f}")
+        click.echo(f"  Ratio:            {ratio:.3f}")
 
     flags_parts = []
     if header.flags & 0x01:
@@ -225,31 +235,54 @@ def info(input_file: str) -> None:
     if header.flags & 0x02:
         flags_parts.append("priors")
     if flags_parts:
-        click.echo(f"  Flags:          {', '.join(flags_parts)}")
+        click.echo(f"  Flags:            {', '.join(flags_parts)}")
 
     if header.mode == MODE_ONLINE and header.version == VERSION_V3:
         _, sections, _ = read_file_v3(data)
-        click.echo("  Online path:    structured")
-        click.echo(f"  Analysis:       {'yes' if SECTION_ANALYSIS in sections else 'no'}")
-        click.echo(f"  Dictionary:     {'yes' if SECTION_PHRASE_TABLE in sections else 'no'}")
-        if SECTION_SEGMENTS in sections:
-            stats = StructuredOnlineStats.deserialize(sections.get(SECTION_STATS, b""))
-            click.echo(f"  Segments:       {stats.segment_count}")
-            click.echo(f"  Phrase count:   {stats.phrase_count}")
+        click.echo("  Online path:      structured")
+        click.echo(f"  Analysis:         {'yes' if SECTION_ANALYSIS in sections else 'no'}")
+        click.echo(f"  Dictionary:       {'yes' if SECTION_PHRASE_TABLE in sections else 'no'}")
+        click.echo(f"  Templates:        {'yes' if SECTION_TEMPLATES in sections else 'no'}")
+        stats = StructuredOnlineStats.deserialize(_section_data(sections, SECTION_STATS))
+        if stats.segment_count:
+            click.echo(f"  Segments:         {stats.segment_count}")
+            click.echo(f"  Phrase count:     {stats.phrase_count}")
+            click.echo(f"  Template count:   {stats.template_count}")
+            click.echo(f"  Template hit:     {stats.template_hit_count}")
+            click.echo(f"  Residual bytes:   {stats.residual_bytes}")
+            click.echo(f"  Payload bytes:    {stats.payload_bytes}")
+            click.echo(f"  Analysis bytes:   {stats.analysis_bytes}")
+            click.echo(f"  Dictionary bytes: {stats.dictionary_bytes}")
+            click.echo(f"  Template bytes:   {stats.templates_bytes}")
+            click.echo(f"  Segment bytes:    {stats.segments_bytes}")
+            click.echo(f"  Side info total:  {stats.side_info_bytes}")
             if stats.route_counts:
                 route_text = ", ".join(f"{route}={count}" for route, count in stats.route_counts)
-                click.echo(f"  Routes:         {route_text}")
-            click.echo("  Decompress:     API-free")
+                click.echo(f"  Routes:           {route_text}")
+            if stats.reason_counts:
+                reason_text = ", ".join(f"{reason}={count}" for reason, count in stats.reason_counts)
+                click.echo(f"  Estimator notes:  {reason_text}")
+        click.echo("  Decompress:       API-free")
+        for section_type, label in (
+            (SECTION_ANALYSIS, "Analysis stored"),
+            (SECTION_PHRASE_TABLE, "Dictionary stored"),
+            (SECTION_TEMPLATES, "Templates stored"),
+            (SECTION_SEGMENTS, "Segments stored"),
+            (SECTION_STATS, "Stats stored"),
+        ):
+            section = sections.get(section_type)
+            if section:
+                click.echo(f"  {label:<17}{_section_size(section):,} bytes")
     elif header.mode == MODE_ONLINE and model_data:
         sub_mode, api_model, chunk_chars, max_tokens, char_cache, tok_cache = _unpack_online_model_data(model_data)
         sub_str = "token" if sub_mode == SUB_MODE_TOKEN else "char"
-        click.echo(f"  Online path:    legacy-{sub_str}")
+        click.echo(f"  Online path:      legacy-{sub_str}")
         if api_model:
-            click.echo(f"  API model:      {api_model}")
-        click.echo(f"  Chunk chars:    {chunk_chars}")
-        click.echo(f"  Max tokens:     {max_tokens}")
+            click.echo(f"  API model:        {api_model}")
+        click.echo(f"  Chunk chars:      {chunk_chars}")
+        click.echo(f"  Max tokens:       {max_tokens}")
         has_cache = char_cache is not None or tok_cache is not None
-        click.echo(f"  Pred. cache:    {'yes (API-free decompress)' if has_cache else 'no'}")
+        click.echo(f"  Pred. cache:      {'yes (API-free decompress)' if has_cache else 'no'}")
 
 
 @main.command()
@@ -285,9 +318,27 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
     api_client = _make_api_client(cfg)
     if api_client:
         t0 = time.perf_counter()
-        online_structured = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="structured")
+        structured_raw = _structured_online_compress(
+            text=text,
+            text_bytes=text_bytes,
+            crc=compute_crc32(text_bytes),
+            api_client=api_client,
+            model_name=cfg.model,
+            priors=_get_priors(),
+            flags=0,
+            max_order=4,
+        )
         t_structured = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (structured)':<30} {len(online_structured):>8,} {len(online_structured)/original:>8.3f}  ({t_structured:.2f}s)")
+        click.echo(f"  {'zippedtext online (structured)':<30} {len(structured_raw):>8,} {len(structured_raw)/original:>8.3f}  ({t_structured:.2f}s)")
+        structured_header, structured_sections, _ = read_file_v3(structured_raw)
+        structured_stats = StructuredOnlineStats.deserialize(_section_data(structured_sections, SECTION_STATS))
+        click.echo(f"    side info={structured_stats.side_info_bytes:,} payload={structured_stats.payload_bytes:,} residual={structured_stats.residual_bytes:,}")
+        if structured_stats.route_counts:
+            click.echo("    routes=" + ", ".join(f"{route}={count}" for route, count in structured_stats.route_counts))
+        if len(structured_raw) > len(offline):
+            click.echo(f"    fallback=offline by {len(structured_raw) - len(offline):,} bytes")
+            if structured_stats.reason_counts:
+                click.echo("    loss reason=" + ", ".join(f"{reason}={count}" for reason, count in structured_stats.reason_counts))
 
         t0 = time.perf_counter()
         online_char = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="char")
@@ -315,3 +366,12 @@ def _make_api_client(cfg):
         return None
     from .api_client import ApiClient
     return ApiClient(api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url)
+
+
+def _section_data(sections: dict[int, V3Section], section_type: int) -> bytes:
+    section = sections.get(section_type)
+    return section.data if section else b""
+
+
+def _section_size(section: V3Section) -> int:
+    return section.stored_size if section.stored_size is not None else len(section.data)

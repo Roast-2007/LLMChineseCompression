@@ -161,8 +161,16 @@ class ApiClient:
   "char_frequencies": {{"字符": 频率, ...}},
   "top_bigrams": [["字符对", 频率], ...],
   "phrase_dictionary": [["常用短语", 编号], ...],
-  "language_segments": [{{"start": 起始位置, "end": 结束位置, "lang": "zh"|"en"|"num"}}]
+  "language_segments": [{{"start": 起始位置, "end": 结束位置, "lang": "zh"|"en"|"num"}}],
+  "template_hints": ["key_value", "list_prefix", "table_row"]
 }}
+
+要求：
+- char_frequencies 最多返回 64 项
+- top_bigrams 最多返回 32 项
+- phrase_dictionary 最多返回 32 项
+- language_segments 只保留高价值片段
+- template_hints 只返回高置信度命中
 
 只返回JSON，不要任何解释。
 

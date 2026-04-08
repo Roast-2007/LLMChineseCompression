@@ -34,11 +34,12 @@ LLM 增强的无损中英文纯文本压缩工具。
 1. **自适应 PPM 预测器**：维护多阶（order-0 到 order-6 可配置）字符级 n-gram 模型，在编码/解码过程中实时学习文本的统计规律。
 2. **中文字符频率先验**：预置 top-3000 中文字符频率表作为 warm start，显著改善短文本压缩。
 3. **短语级编码**：自动识别高频短语（2-8 字符），将其作为单一符号编码。
-4. **structured online（v0.3.2）**：
+4. **structured online（当前主路径）**：
    - LLM 一次性分析全文；
-   - 生成字符频率、短语/术语候选、语言片段提示；
-   - 本地分段并根据收益选择 literal / phrase route；
-   - 把 analysis、phrase table、segment metadata、route stats 写进 `.ztxt` v3；
+   - 生成字符频率、短语/术语候选、语言片段提示、template hints；
+   - 本地分段，并用 gain estimator 在 literal / phrase / template 之间做净收益选路；
+   - template route 采用 `template_id + slot values + residual`，residual 继续复用现有 literal / phrase coder；
+   - analysis / dictionary / templates / segment metadata / stats 写入 `.ztxt` v3 typed sections；
    - 解压时不访问远端 API，只依赖文件内 side info 和确定性本地 coder。
 5. **legacy online char/token**：保留旧版 prediction-cache 方案，用于兼容和效果对比。
 6. **代码生成模式**（实验性）：LLM 识别可用 Python 表达式表示的文本片段，将这些片段存储为代码而非压缩数据。
@@ -160,7 +161,8 @@ zippedtext bench input.txt --api-key sk-your-key
 会显示：
 - 格式版本（v2 / v3）
 - online 路径类型（structured / legacy-char / legacy-token）
-- structured online 的 analysis / dictionary / segment / route stats
+- structured online 的 analysis / dictionary / templates / segment / stats 拆解
+- route 分布、template hit、residual bytes、side info total
 - 是否可 API-free 解压
 
 ### `zippedtext bench` — 基准测试
@@ -172,6 +174,11 @@ zippedtext bench input.txt --api-key sk-your-key
 - zippedtext online (structured)
 - zippedtext online (legacy char)
 - zippedtext online (legacy token)
+
+其中 structured online 会额外显示：
+- side info / payload / residual 成本
+- route 分布
+- 若 whole-file 最终回退 offline，则显示 fallback 差值与 loss reason
 
 ## Python API
 
@@ -228,9 +235,12 @@ Offset  Size    Field
 `.ztxt` v3 采用 section 化设计，当前至少包含：
 - analysis section
 - phrase / dictionary section
+- template catalog section
 - segment metadata section
 - route stats section
 - payload body
+
+section entry 自带 flags，可选择 raw / zstd codec；读取时会保留 section flags 与 stored size。
 
 这让 online mode 可以存储**压缩友好的结构化决策信息**，而不是直接缓存原始生成文本。
 
@@ -254,6 +264,10 @@ src/zippedtext/
 ├── format.py               # .ztxt 二进制格式 (v1 + v2 + v3)
 ├── api_client.py           # API 客户端（OpenAI 协议兼容）
 ├── online_manifest.py      # structured online manifest / stats
+├── sideinfo_codec.py       # section codec / side info helpers
+├── template_codec.py       # template catalog / template payload codec
+├── residual.py             # residual payload packing / reuse of literal+phrase coder
+├── gain_estimator.py       # segment gain estimation / route scoring
 ├── segment.py              # segment splitter / classifier
 ├── router.py               # segment router / gain-based selection
 ├── term_dictionary.py      # LLM + heuristic phrase dictionary builder

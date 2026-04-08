@@ -40,6 +40,7 @@ from .format import (
     SECTION_PHRASE_TABLE,
     SECTION_SEGMENTS,
     SECTION_STATS,
+    SECTION_TEMPLATES,
     VERSION_V3,
     compute_crc32,
     read_file,
@@ -50,6 +51,7 @@ from .format import (
 )
 from .online_manifest import (
     ROUTE_PHRASE,
+    ROUTE_TEMPLATE,
     SegmentRecord,
     StructuredOnlineStats,
     deserialize_segment_records,
@@ -58,6 +60,8 @@ from .online_manifest import (
 from .predictor.llm import CHUNK_CHARS, MAX_TOKENS_DEFAULT
 from .router import route_segments
 from .segment import split_text_segments
+from .sideinfo_codec import make_section, section_stored_size
+from .template_codec import TemplateCatalog, build_template_catalog, decode_template_segment
 from .term_dictionary import build_structured_phrase_table
 
 # Online mode sub-modes (stored in model_data)
@@ -358,12 +362,18 @@ def _structured_online_compress(
     phrase_set = frozenset(phrase_table.phrases)
     phrase_table_bytes = phrase_table.serialize() if phrase_table.phrases else b""
     segments = split_text_segments(text, analysis)
+    template_catalog = build_template_catalog(segments, text, analysis)
+    template_bytes = template_catalog.serialize() if template_catalog.entries else b""
     route_summary = route_segments(
         text=text,
         segments=segments,
         phrase_set=phrase_set,
         priors=priors or None,
         max_order=max_order,
+        template_catalog=template_catalog,
+        analysis=analysis,
+        phrase_section_cost=len(phrase_table_bytes),
+        template_section_cost=len(template_bytes),
     )
     payload_parts: list[bytes] = []
     records: list[SegmentRecord] = []
@@ -380,24 +390,42 @@ def _structured_online_compress(
                 payload_len=payload_len,
                 original_bytes=routed.original_bytes,
                 encoded_bytes=routed.encoded_bytes,
+                residual_bytes=routed.residual_bytes,
+                estimated_gain_bytes=routed.estimated_gain_bytes,
             )
         )
-    analysis_bytes = analysis.serialize()
+    stored_analysis = analysis.for_storage()
+    analysis_bytes = stored_analysis.serialize()
     segment_bytes = serialize_segment_records(tuple(records))
+
+    analysis_section = make_section(analysis_bytes, prefer_compression=True)
+    phrase_section = make_section(phrase_table_bytes)
+    template_section = make_section(template_bytes)
+    segment_section = make_section(segment_bytes, prefer_compression=True)
+
     stats = StructuredOnlineStats(
         segment_count=len(records),
         phrase_count=len(phrase_table.phrases),
-        analysis_bytes=len(analysis_bytes),
-        dictionary_bytes=len(phrase_table_bytes),
-        segments_bytes=len(segment_bytes),
+        template_count=len(template_catalog.entries),
+        template_hit_count=route_summary.template_hit_count,
+        residual_bytes=route_summary.residual_bytes,
+        analysis_bytes=section_stored_size(analysis_section),
+        dictionary_bytes=section_stored_size(phrase_section),
+        templates_bytes=section_stored_size(template_section),
+        segments_bytes=section_stored_size(segment_section),
         payload_bytes=payload_bytes,
         route_counts=route_summary.route_counts,
+        reason_counts=route_summary.reason_counts,
+        estimated_gain_bytes=route_summary.estimated_gain_bytes,
+        literal_payload_bytes=route_summary.literal_payload_bytes,
     )
+    stats_section = make_section(stats.serialize(), prefer_compression=True)
     sections = {
-        SECTION_ANALYSIS: analysis_bytes,
-        SECTION_PHRASE_TABLE: phrase_table_bytes,
-        SECTION_SEGMENTS: segment_bytes,
-        SECTION_STATS: stats.serialize(),
+        SECTION_ANALYSIS: analysis_section,
+        SECTION_PHRASE_TABLE: phrase_section,
+        SECTION_TEMPLATES: template_section,
+        SECTION_SEGMENTS: segment_section,
+        SECTION_STATS: stats_section,
     }
     structured_flags = flags | (FLAG_PHRASE_ENCODING if phrase_table.phrases else 0)
     header = Header(
@@ -423,9 +451,10 @@ def _structured_online_decompress(
     _, sections, body = read_file_v3(data)
     from .predictor.phrases import PhraseTable
 
-    phrase_table = PhraseTable.deserialize(sections.get(SECTION_PHRASE_TABLE, b""))
+    phrase_table = PhraseTable.deserialize(sections.get(SECTION_PHRASE_TABLE, make_section(b"")).data)
     phrase_set = frozenset(phrase_table.phrases)
-    records = deserialize_segment_records(sections.get(SECTION_SEGMENTS, b""))
+    template_catalog = TemplateCatalog.deserialize(sections.get(SECTION_TEMPLATES, make_section(b"")).data)
+    records = deserialize_segment_records(sections.get(SECTION_SEGMENTS, make_section(b"")).data)
     pieces: list[str] = []
     offset = 0
     produced = 0
@@ -439,6 +468,15 @@ def _structured_online_decompress(
                 record.char_count,
                 phrase_set,
                 None,
+                priors=priors,
+                max_order=max_order,
+            )
+        elif record.route == ROUTE_TEMPLATE:
+            text = decode_template_segment(
+                payload,
+                template_catalog,
+                phrase_set,
+                record.char_count,
                 priors=priors,
                 max_order=max_order,
             )

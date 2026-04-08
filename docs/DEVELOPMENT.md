@@ -86,6 +86,10 @@ src/zippedtext/
 ├── format.py                  # .ztxt 格式 v1 + v2 + v3
 ├── api_client.py              # ApiClient（OpenAI 协议兼容）
 ├── online_manifest.py         # structured online 元数据与统计
+├── sideinfo_codec.py          # v3 section codec / side info helper
+├── template_codec.py          # template catalog / payload codec
+├── residual.py                # residual 编码与解码辅助
+├── gain_estimator.py          # segment gain estimator
 ├── segment.py                 # 文本分段与段类型分类
 ├── router.py                  # segment route / 收益判断
 ├── term_dictionary.py         # LLM + heuristic 短语/术语字典
@@ -280,11 +284,21 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] 引入 structured online 测试
 - [x] structured online API-free 解压
 
-### 下一阶段
+### v0.3.3-dev — structured online 第二阶段 ✅
 
-- [ ] template codec
-- [ ] residual architecture
-- [ ] online gain estimator
+- [x] template codec 最小闭环（key-value / list prefix / table row）
+- [x] residual architecture（template residual 复用 literal / phrase coder）
+- [x] online gain estimator（literal / phrase / template 净收益选路）
+- [x] stronger structured side-info compression（section flags + raw/zstd codec + compact binary metadata）
+- [x] `zippedtext info` / `bench` side-info 拆解与 route 可观测性
+- [x] `tests/test_sideinfo_codec.py`
+- [x] `tests/test_template_codec.py`
+- [x] `tests/test_residual.py`
+- [x] `tests/test_gain_estimator.py`
+
+### 后续仍未完成
+
+- [ ] 更完整模板体系（跨行列表、文档段模板、更多配置模板）
 - [ ] mixture-of-experts probability layer
 - [ ] 本地确定性模型
 - [ ] Rust 核心（PyO3）
@@ -302,8 +316,10 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 因为它让 LLM 参与：
 - 结构分析
 - 分段
-- 路由
+- gain-based 路由
 - 短语/术语发现
+- template codec
+- residual 架构
 - side info 设计
 
 而不是只做 fragile 的 next-token 预测。

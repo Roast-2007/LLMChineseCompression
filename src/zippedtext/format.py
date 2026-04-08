@@ -69,6 +69,12 @@ SECTION_ANALYSIS = 0x01
 SECTION_PHRASE_TABLE = 0x02
 SECTION_SEGMENTS = 0x03
 SECTION_STATS = 0x04
+SECTION_TEMPLATES = 0x05
+
+# v3 section codec flags
+SECTION_CODEC_RAW = 0x00
+SECTION_CODEC_ZSTD = 0x01
+SECTION_FLAG_CODEC_MASK = 0x03
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,33 @@ class Header:
     max_order: int = DEFAULT_MAX_ORDER
     phrase_table_len: int = 0
     version: int = VERSION_V2
+
+
+@dataclass(frozen=True)
+class V3Section:
+    """Decoded v3 section payload plus storage metadata."""
+
+    data: bytes
+    flags: int = 0
+    stored_size: int | None = None
+
+    @property
+    def codec(self) -> int:
+        return self.flags & SECTION_FLAG_CODEC_MASK
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (bytes, bytearray)):
+            return self.data == bytes(other)
+        if not isinstance(other, V3Section):
+            return False
+        return (
+            self.data == other.data
+            and self.flags == other.flags
+            and self.stored_size == other.stored_size
+        )
+
+
+V3SectionMap = dict[int, V3Section]
 
 
 def compute_crc32(data: bytes) -> int:
@@ -122,7 +155,7 @@ def write_file(
 
 def write_file_v3(
     header: Header,
-    sections: dict[int, bytes],
+    sections: dict[int, bytes | V3Section],
     compressed_body: bytes,
 ) -> bytes:
     """Serialize a complete .ztxt v3 file to bytes."""
@@ -211,7 +244,7 @@ def read_file_v2(data: bytes) -> tuple[Header, bytes, bytes, bytes]:
     return header, model_data, phrase_table, compressed_body
 
 
-def read_file_v3(data: bytes) -> tuple[Header, dict[int, bytes], bytes]:
+def read_file_v3(data: bytes) -> tuple[Header, V3SectionMap, bytes]:
     """Read a v3 file and return ``(header, sections, body)``."""
     if len(data) < _V3_SIZE:
         raise ValueError(f"file too short for v3: {len(data)} < {_V3_SIZE}")
@@ -330,27 +363,32 @@ def _read_v3(data: bytes) -> tuple[Header, bytes, bytes]:
 # ------------------------------------------------------------------
 
 
-def _pack_v3_sections(sections: dict[int, bytes]) -> bytes:
-    items = sorted((stype, payload) for stype, payload in sections.items() if payload is not None)
+def _pack_v3_sections(sections: dict[int, bytes | V3Section]) -> bytes:
+    items = sorted(
+        (section_type, _coerce_v3_section(section))
+        for section_type, section in sections.items()
+        if section is not None
+    )
     parts = [struct.pack("<H", len(items))]
-    for section_type, payload in items:
-        parts.append(struct.pack(_V3_SECTION_FMT, section_type, 0, 0, len(payload)))
-        parts.append(payload)
+    for section_type, section in items:
+        encoded = _encode_v3_section_data(section.data, section.flags)
+        parts.append(struct.pack(_V3_SECTION_FMT, section_type, section.flags, 0, len(encoded)))
+        parts.append(encoded)
     return b"".join(parts)
 
 
-def _unpack_v3_sections(data: bytes) -> dict[int, bytes]:
+def _unpack_v3_sections(data: bytes) -> V3SectionMap:
     if not data:
         return {}
     if len(data) < 2:
         raise ValueError("invalid v3 metadata: missing section count")
     section_count = struct.unpack("<H", data[:2])[0]
     offset = 2
-    sections: dict[int, bytes] = {}
+    sections: V3SectionMap = {}
     for _ in range(section_count):
         if offset + _V3_SECTION_SIZE > len(data):
             raise ValueError("invalid v3 metadata: truncated section header")
-        section_type, _flags, _reserved, length = struct.unpack(
+        section_type, flags, _reserved, length = struct.unpack(
             _V3_SECTION_FMT,
             data[offset:offset + _V3_SECTION_SIZE],
         )
@@ -358,6 +396,48 @@ def _unpack_v3_sections(data: bytes) -> dict[int, bytes]:
         end = offset + length
         if end > len(data):
             raise ValueError("invalid v3 metadata: truncated section payload")
-        sections[section_type] = data[offset:end]
+        payload = data[offset:end]
+        decoded = _decode_v3_section_data(payload, flags)
+        sections[section_type] = V3Section(data=decoded, flags=flags, stored_size=length)
         offset = end
     return sections
+
+
+def _coerce_v3_section(section: bytes | V3Section) -> V3Section:
+    if isinstance(section, V3Section):
+        return section
+    return V3Section(data=section)
+
+
+def _encode_v3_section_data(data: bytes, flags: int) -> bytes:
+    codec = _validate_v3_section_flags(flags)
+    if codec == SECTION_CODEC_RAW:
+        return data
+    if codec == SECTION_CODEC_ZSTD:
+        import zstandard
+
+        return zstandard.ZstdCompressor(level=19).compress(data)
+    raise ValueError(f"unsupported v3 section codec: {codec}")
+
+
+def _decode_v3_section_data(data: bytes, flags: int) -> bytes:
+    codec = _validate_v3_section_flags(flags)
+    if codec == SECTION_CODEC_RAW:
+        return data
+    if codec == SECTION_CODEC_ZSTD:
+        import zstandard
+
+        try:
+            return zstandard.ZstdDecompressor().decompress(data)
+        except zstandard.ZstdError as exc:
+            raise ValueError("invalid v3 metadata: zstd decode failed") from exc
+    raise ValueError(f"unsupported v3 section codec: {codec}")
+
+
+def _validate_v3_section_flags(flags: int) -> int:
+    if flags & ~SECTION_FLAG_CODEC_MASK:
+        raise ValueError(f"invalid v3 metadata: unsupported section flags {flags:#04x}")
+    codec = flags & SECTION_FLAG_CODEC_MASK
+    if codec not in (SECTION_CODEC_RAW, SECTION_CODEC_ZSTD):
+        raise ValueError(f"invalid v3 metadata: unsupported section codec {codec}")
+    return codec

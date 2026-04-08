@@ -8,16 +8,21 @@ import time
 import click
 
 from . import __version__
-from .compressor import compress, decompress
+from .compressor import SUB_MODE_TOKEN, _unpack_online_model_data, compress, decompress
 from .config import resolve_config
 from .format import (
     MODE_CODEGEN,
     MODE_OFFLINE,
     MODE_ONLINE,
-    MODEL_DEEPSEEK_CHAT,
-    MODEL_DEEPSEEK_REASONER,
+    SECTION_ANALYSIS,
+    SECTION_PHRASE_TABLE,
+    SECTION_SEGMENTS,
+    SECTION_STATS,
+    VERSION_V3,
     read_file,
+    read_file_v3,
 )
+from .online_manifest import StructuredOnlineStats
 
 
 @click.group()
@@ -26,7 +31,6 @@ def main() -> None:
     """ZippedText — LLM-enhanced lossless text compression."""
 
 
-# Register config subcommand group
 from .cli_config import config as config_group  # noqa: E402
 
 main.add_command(config_group)
@@ -43,9 +47,9 @@ main.add_command(config_group)
 )
 @click.option(
     "--sub-mode",
-    type=click.Choice(["char", "token"]),
-    default="char",
-    help="Online sub-mode: char (default) or token (experimental)",
+    type=click.Choice(["structured", "char", "token"]),
+    default="structured",
+    help="Online sub-mode: structured (default), char, or token",
 )
 @click.option("--model", default=None, help="Model name (overrides config)")
 @click.option("--api-key", default=None, help="API key (overrides config/env)")
@@ -92,7 +96,7 @@ def c(
     t0 = time.perf_counter()
 
     def on_progress(current: int, total: int) -> None:
-        pct = current * 100 // total
+        pct = current * 100 // total if total else 100
         click.echo(f"\r  [{pct:3d}%] {current}/{total} chars", nl=False)
 
     data = compress(
@@ -143,10 +147,8 @@ def d(
     header, model_data, _ = read_file(data)
     cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url)
 
-    # Check if file has embedded prediction cache (v0.3.1+)
-    has_cache = False
-    if header.mode == MODE_ONLINE and model_data:
-        from .compressor import _unpack_online_model_data
+    has_cache = header.mode == MODE_ONLINE and header.version == VERSION_V3
+    if header.mode == MODE_ONLINE and header.version != VERSION_V3 and model_data:
         _, _, _, _, cc, tc = _unpack_online_model_data(model_data)
         has_cache = cc is not None or tc is not None
 
@@ -158,9 +160,7 @@ def d(
         )
         sys.exit(1)
 
-    # Warn if model mismatch
-    if header.mode == MODE_ONLINE and model_data:
-        from .compressor import _unpack_online_model_data
+    if header.mode == MODE_ONLINE and header.version != VERSION_V3 and model_data:
         _, file_model, _, _, _, _ = _unpack_online_model_data(model_data)
         if file_model and file_model != cfg.model:
             click.echo(
@@ -179,7 +179,7 @@ def d(
     t0 = time.perf_counter()
 
     def on_progress(current: int, total: int) -> None:
-        pct = current * 100 // total
+        pct = current * 100 // total if total else 100
         click.echo(f"\r  [{pct:3d}%] {current}/{total} tokens", nl=False)
 
     text = decompress(data, api_client=api_client, on_progress=on_progress)
@@ -204,13 +204,11 @@ def info(input_file: str) -> None:
     header, model_data, body = read_file(data)
     mode_map = {MODE_ONLINE: "online", MODE_OFFLINE: "offline", MODE_CODEGEN: "codegen"}
     mode_str = mode_map.get(header.mode, f"unknown({header.mode})")
-    model_names = {MODEL_DEEPSEEK_CHAT: "deepseek-chat", MODEL_DEEPSEEK_REASONER: "deepseek-reasoner"}
-    model_str = model_names.get(header.model_id, "(see model data)") if header.model_id else "(v2 format)"
 
     click.echo(f"File: {input_file}")
     click.echo(f"  Size:           {len(data):,} bytes")
+    click.echo(f"  Version:        v{header.version}")
     click.echo(f"  Mode:           {mode_str}")
-    click.echo(f"  Model:          {model_str}")
     click.echo(f"  Max order:      {header.max_order}")
     click.echo(f"  Token count:    {header.token_count:,}")
     click.echo(f"  Original size:  {header.original_bytes:,} bytes")
@@ -221,24 +219,31 @@ def info(input_file: str) -> None:
         ratio = len(data) / header.original_bytes
         click.echo(f"  Ratio:          {ratio:.3f}")
 
-    # v2 flags
-    from .format import FLAG_PHRASE_ENCODING, FLAG_HAS_PRIORS
     flags_parts = []
-    if header.flags & FLAG_PHRASE_ENCODING:
+    if header.flags & 0x01:
         flags_parts.append("phrases")
-    if header.flags & FLAG_HAS_PRIORS:
+    if header.flags & 0x02:
         flags_parts.append("priors")
     if flags_parts:
         click.echo(f"  Flags:          {', '.join(flags_parts)}")
 
-    # Online mode extra info
-    if header.mode == MODE_ONLINE and model_data:
-        from .compressor import _unpack_online_model_data, SUB_MODE_TOKEN
-        sub_mode, api_model, chunk_chars, max_tokens, char_cache, tok_cache = (
-            _unpack_online_model_data(model_data)
-        )
+    if header.mode == MODE_ONLINE and header.version == VERSION_V3:
+        _, sections, _ = read_file_v3(data)
+        click.echo("  Online path:    structured")
+        click.echo(f"  Analysis:       {'yes' if SECTION_ANALYSIS in sections else 'no'}")
+        click.echo(f"  Dictionary:     {'yes' if SECTION_PHRASE_TABLE in sections else 'no'}")
+        if SECTION_SEGMENTS in sections:
+            stats = StructuredOnlineStats.deserialize(sections.get(SECTION_STATS, b""))
+            click.echo(f"  Segments:       {stats.segment_count}")
+            click.echo(f"  Phrase count:   {stats.phrase_count}")
+            if stats.route_counts:
+                route_text = ", ".join(f"{route}={count}" for route, count in stats.route_counts)
+                click.echo(f"  Routes:         {route_text}")
+            click.echo("  Decompress:     API-free")
+    elif header.mode == MODE_ONLINE and model_data:
+        sub_mode, api_model, chunk_chars, max_tokens, char_cache, tok_cache = _unpack_online_model_data(model_data)
         sub_str = "token" if sub_mode == SUB_MODE_TOKEN else "char"
-        click.echo(f"  Sub-mode:       {sub_str}")
+        click.echo(f"  Online path:    legacy-{sub_str}")
         if api_model:
             click.echo(f"  API model:      {api_model}")
         click.echo(f"  Chunk chars:    {chunk_chars}")
@@ -264,7 +269,6 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
     click.echo(f"Benchmarking: {input_file}")
     click.echo(f"  Text: {len(text):,} chars, {original:,} bytes (UTF-8)\n")
 
-    # Baselines
     gz = gzip.compress(text_bytes, compresslevel=9)
     zs = __import__("zstandard").ZstdCompressor(level=19).compress(text_bytes)
     click.echo(f"  {'Method':<30} {'Size':>8} {'Ratio':>8}")
@@ -273,27 +277,31 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
     click.echo(f"  {'gzip -9':<30} {len(gz):>8,} {len(gz)/original:>8.3f}")
     click.echo(f"  {'zstd -19':<30} {len(zs):>8,} {len(zs)/original:>8.3f}")
 
-    # Offline mode (no API)
     t0 = time.perf_counter()
     offline = compress(text, mode="offline")
     t_offline = time.perf_counter() - t0
     click.echo(f"  {'zippedtext offline':<30} {len(offline):>8,} {len(offline)/original:>8.3f}  ({t_offline:.2f}s)")
 
-    # Online mode with API (if available)
     api_client = _make_api_client(cfg)
     if api_client:
         t0 = time.perf_counter()
+        online_structured = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="structured")
+        t_structured = time.perf_counter() - t0
+        click.echo(f"  {'zippedtext online (structured)':<30} {len(online_structured):>8,} {len(online_structured)/original:>8.3f}  ({t_structured:.2f}s)")
+
+        t0 = time.perf_counter()
         online_char = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="char")
         t_char = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (char)':<30} {len(online_char):>8,} {len(online_char)/original:>8.3f}  ({t_char:.2f}s)")
+        click.echo(f"  {'zippedtext online (legacy char)':<30} {len(online_char):>8,} {len(online_char)/original:>8.3f}  ({t_char:.2f}s)")
 
         t0 = time.perf_counter()
         online_token = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="token")
         t_token = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (token)':<30} {len(online_token):>8,} {len(online_token)/original:>8.3f}  ({t_token:.2f}s)")
+        click.echo(f"  {'zippedtext online (legacy token)':<30} {len(online_token):>8,} {len(online_token)/original:>8.3f}  ({t_token:.2f}s)")
     else:
-        click.echo(f"  {'zippedtext online (char)':<30} {'(no API key)':>8}")
-        click.echo(f"  {'zippedtext online (token)':<30} {'(no API key)':>8}")
+        click.echo(f"  {'zippedtext online (structured)':<30} {'(no API key)':>8}")
+        click.echo(f"  {'zippedtext online (legacy char)':<30} {'(no API key)':>8}")
+        click.echo(f"  {'zippedtext online (legacy token)':<30} {'(no API key)':>8}")
 
 
 def _read_text(path: str) -> str:

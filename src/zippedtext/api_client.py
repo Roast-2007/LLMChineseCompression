@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from openai import OpenAI
+
+from .online_manifest import AnalysisManifest
 
 
 @dataclass(frozen=True)
@@ -16,7 +19,7 @@ class TokenLogprob:
 
     token: str
     logprob: float
-    top_alternatives: list[tuple[str, float]]  # (token_str, logprob)
+    top_alternatives: list[tuple[str, float]]
 
 
 @dataclass(frozen=True)
@@ -25,8 +28,8 @@ class GeneratedToken:
 
     text: str
     logprob: float
-    top_alternatives: list[tuple[str, float]]  # (token_str, logprob)
-    char_offset: int  # starting character position in generated text
+    top_alternatives: list[tuple[str, float]]
+    char_offset: int
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ class ApiClient:
     """Wraps any OpenAI-compatible API for logprobs retrieval."""
 
     MAX_RETRIES = 3
-    RETRY_BASE_DELAY = 1.0  # seconds
+    RETRY_BASE_DELAY = 1.0
 
     def __init__(
         self,
@@ -54,9 +57,9 @@ class ApiClient:
         self._client = OpenAI(
             api_key=api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
             base_url=base_url,
-            timeout=60.0,  # prevent hanging on slow API
+            timeout=60.0,
         )
-        self.last_model_id: str = ""  # set after each API call
+        self.last_model_id: str = ""
 
     def generate_continuation(
         self,
@@ -64,15 +67,7 @@ class ApiClient:
         max_tokens: int = 200,
         max_top_logprobs: int = 20,
     ) -> ChunkResult:
-        """Generate continuation text with token-level logprobs.
-
-        Calls the API with the given context and returns generated tokens,
-        each annotated with logprobs and character offset in the generated
-        text.  Uses temperature=0 and a fixed seed for deterministic output
-        — encoder and decoder MUST get identical predictions.
-
-        Retries on transient failures.
-        """
+        """Generate continuation text with token-level logprobs."""
         messages = self._build_continuation_messages(context)
 
         for attempt in range(self.MAX_RETRIES):
@@ -105,12 +100,14 @@ class ApiClient:
                 (alt.token, alt.logprob)
                 for alt in (token_info.top_logprobs or [])
             ]
-            tokens.append(GeneratedToken(
-                text=token_info.token,
-                logprob=token_info.logprob,
-                top_alternatives=alternatives,
-                char_offset=char_offset,
-            ))
+            tokens.append(
+                GeneratedToken(
+                    text=token_info.token,
+                    logprob=token_info.logprob,
+                    top_alternatives=alternatives,
+                    char_offset=char_offset,
+                )
+            )
             char_offset += len(token_info.token)
 
         generated_text = "".join(t.text for t in tokens)
@@ -126,14 +123,7 @@ class ApiClient:
         continuation: str,
         max_top_logprobs: int = 20,
     ) -> list[TokenLogprob]:
-        """Get logprobs for generating `continuation` given `context`.
-
-        Strategy: Ask the model to continue the text. We use temperature=0
-        for determinism. The model may not reproduce `continuation` exactly,
-        so we collect whatever logprobs the API returns.
-
-        Returns one TokenLogprob per generated token.
-        """
+        """Get logprobs for generating `continuation` given `context`."""
         messages = self._build_continuation_messages(context)
 
         response = self._client.chat.completions.create(
@@ -155,24 +145,22 @@ class ApiClient:
                 (alt.token, alt.logprob)
                 for alt in (token_info.top_logprobs or [])
             ]
-            result.append(TokenLogprob(
-                token=token_info.token,
-                logprob=token_info.logprob,
-                top_alternatives=alternatives,
-            ))
+            result.append(
+                TokenLogprob(
+                    token=token_info.token,
+                    logprob=token_info.logprob,
+                    top_alternatives=alternatives,
+                )
+            )
         return result
 
-    def analyze_text(self, text: str) -> dict:
-        """Use LLM to analyze text and generate an optimized compression model.
-
-        Used by offline mode: one API call to generate character frequencies,
-        bigrams, phrase dictionary, and segment hints.
-        """
+    def analyze_text(self, text: str) -> AnalysisManifest:
+        """Use the LLM once to build a structured compression manifest."""
         prompt = f"""分析以下文本，返回一个JSON对象用于文本压缩优化。JSON格式如下：
 {{
-  "char_frequencies": {{"字符": 频率, ...}},  // 出现频率最高的前200个字符及其相对频率(0-1)
-  "top_bigrams": [["字符对", 频率], ...],  // 前100个最常见的双字符组合
-  "phrase_dictionary": [["常用短语", 编号], ...],  // 文本中重复出现的短语(2-8字)，最多50个
+  "char_frequencies": {{"字符": 频率, ...}},
+  "top_bigrams": [["字符对", 频率], ...],
+  "phrase_dictionary": [["常用短语", 编号], ...],
   "language_segments": [{{"start": 起始位置, "end": 结束位置, "lang": "zh"|"en"|"num"}}]
 }}
 
@@ -190,19 +178,15 @@ class ApiClient:
             max_tokens=4000,
             temperature=0,
         )
-        import json
         raw = response.choices[0].message.content.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(raw)
+        self.last_model_id = response.model or self.model
+        payload = _safe_parse_analysis_payload(raw)
+        return AnalysisManifest.from_api_payload(payload, len(text))
 
     def list_models(self) -> list[str]:
-        """Fetch available model IDs from the API provider.
-
-        Uses the standard ``GET /v1/models`` endpoint supported by
-        OpenAI-compatible APIs.
-        """
+        """Fetch available model IDs from the API provider."""
         try:
             response = self._client.models.list()
             ids = sorted(m.id for m in response.data)
@@ -237,10 +221,25 @@ class ApiClient:
             },
         ]
 
-    # Keep legacy alias for backwards compatibility
     def _build_messages(self, context: str, expected_len: int) -> list[dict]:
         return self._build_continuation_messages(context)
 
 
-# Backward-compatible alias
+def _safe_parse_analysis_payload(raw: str) -> dict | None:
+    try:
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        snippet = raw[start:end + 1]
+        try:
+            payload = json.loads(snippet)
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
 DeepSeekClient = ApiClient

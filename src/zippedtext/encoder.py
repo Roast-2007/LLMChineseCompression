@@ -138,12 +138,11 @@ def encode_online_token(
     max_order: int = 4,
     chunk_chars: int | None = None,
     max_tokens: int | None = None,
-) -> bytes:
+) -> tuple[bytes, list]:
     """Token-level online encoding.
 
-    Walk through the text, trying to match LLM-generated tokens.
-    Matched tokens are encoded cheaply via their rank in the top-k CDF.
-    Unmatched regions fall back to character-level PPM encoding.
+    Returns ``(compressed_body, prediction_cache)`` for legacy token-mode
+    decompression without live API calls.
     """
     from .predictor.llm import LlmTokenPredictor
 

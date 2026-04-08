@@ -1,3 +1,3 @@
 """ZippedText — LLM-enhanced lossless text compression."""
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

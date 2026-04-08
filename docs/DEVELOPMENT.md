@@ -224,6 +224,14 @@ pip install -e ".[dev]"
 - [x] 交互式配置系统
 - [x] .ztxt 格式 v2
 
+### v0.3.1 — 在线模式性能优化 ✅
+
+- [x] `CHUNK_CHARS` 20 → 200，API 调用减少 10 倍
+- [x] 预测缓存嵌入 .ztxt 文件，解压无需 API（~1s）
+- [x] 智能回退：在线+缓存文件若大于离线则自动使用离线
+- [x] model_data 存储 chunk_chars、max_tokens、prediction_cache
+- [x] 修复 DeepSeek API 长上下文非确定性问题
+
 ### v0.4.0 — 性能优化
 
 - [ ] Rust 核心（PyO3）：`arithmetic.py` + `bitstream.py` 用 Rust 重写

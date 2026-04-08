@@ -7,15 +7,23 @@ Two approaches:
      matching generated tokens against actual text, with character-level
      fallback for mismatches.
 
-Both predictors maintain a cache of predictions from the last API call and
-refresh automatically when the cache is exhausted.  Encoder and decoder
-MUST make identical API calls at identical positions to stay in sync.
+v0.3.1 performance optimisations
+---------------------------------
+* CHUNK_CHARS raised from 20 → 200 (~10× fewer API calls).
+* Refresh positions are strictly deterministic (every CHUNK_CHARS chars).
+  Characters beyond the generated text in each chunk get pure PPM (no boost).
+* **Prediction cache**: during compression, all LLM responses are collected
+  and stored in the .ztxt file (zstd-compressed).  During decompression the
+  cached predictions are used directly — NO API calls, NO non-determinism,
+  near-instant decompression.
+* Parameters (chunk_chars, max_tokens) are stored in the .ztxt model_data
+  section so encoder and decoder always agree.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,13 +33,14 @@ if TYPE_CHECKING:
 # Constants
 # ---------------------------------------------------------------------------
 
-CHAR_BOOST = 20.0        # multiplicative boost for LLM-predicted character
-CHUNK_CHARS = 20          # make a new API call every ~N characters
-MAX_CONTEXT_LEN = 3000    # max context chars sent to API (trim older text)
-MIN_PROB_FLOOR = 1e-8     # minimum probability for any character
+CHAR_BOOST = 20.0          # multiplicative boost for LLM-predicted character
+CHUNK_CHARS = 200           # characters per chunk before forced API refresh
+MAX_TOKENS_DEFAULT = 100    # tokens per API call (v0.3.1: reduced for speed)
+MAX_CONTEXT_LEN = 3000      # max context chars sent to API (trim older text)
+MIN_PROB_FLOOR = 1e-8       # minimum probability for any character
 
 # Token-level constants
-CATCH_ALL_VOCAB = 100_000  # virtual vocab size for non-top-k tokens
+CATCH_ALL_VOCAB = 100_000   # virtual vocab size for non-top-k tokens
 
 
 # ---------------------------------------------------------------------------
@@ -46,42 +55,58 @@ class LlmCharPredictor:
       2. Extract the predicted character at each position.
       3. When encoding/decoding character *i*, multiply the predicted
          character's PPM probability by CHAR_BOOST, then re-normalize.
-      4. **Stop boosting** after the first mismatch in a chunk — subsequent
-         predictions are unreliable once context diverges from generation.
-      5. When cache is exhausted, make a new API call with updated context.
+      4. **Stop boosting** after the first mismatch in a chunk.
+      5. Refresh happens at fixed intervals (every ``chunk_chars`` chars).
 
-    Both encoder and decoder feed the *actual* text (so far) as context,
-    ensuring deterministic API calls at deterministic positions.  They
-    independently track the mismatch flag (since they see the same chars).
+    v0.3.1 prediction cache:
+      - ``prediction_cache`` is a list of generated-text strings, one per
+        chunk.  When provided (decompression), predictions are read from
+        the cache instead of calling the API.
+      - ``collect_cache`` controls whether to collect predictions during
+        encoding (compression).
     """
 
-    def __init__(self, api_client: DeepSeekClient, chunk_chars: int | None = None) -> None:
+    def __init__(
+        self,
+        api_client: DeepSeekClient | None = None,
+        chunk_chars: int | None = None,
+        max_tokens: int | None = None,
+        prediction_cache: list[str] | None = None,
+        collect_cache: bool = False,
+    ) -> None:
         self._api = api_client
         self._chunk_chars = chunk_chars if chunk_chars is not None else CHUNK_CHARS
+        self._max_tokens = max_tokens if max_tokens is not None else MAX_TOKENS_DEFAULT
 
         # Cache: predicted characters for current chunk
         self._predicted_chars: str = ""
-        self._chunk_start: int = 0   # char position where current chunk begins
-        self._pos: int = 0           # current char position in the full text
+        self._chunk_start: int = 0
+        self._pos: int = 0
+        self._initialized: bool = False
 
         # Accumulated actual text (for API context)
         self._actual_text: str = ""
-
-        # Stop-on-mismatch: once the actual text diverges from the
-        # prediction, stop boosting for the rest of this chunk.
         self._chunk_diverged: bool = False
+
+        # --- Prediction cache ---
+        self._prediction_cache = prediction_cache  # read-only cache (decompression)
+        self._cache_idx: int = 0
+        self._collect_cache = collect_cache
+        self._collected: list[str] = []  # written during compression
 
     @property
     def model_name(self) -> str:
-        return self._api.last_model_id or self._api.model
+        if self._api:
+            return self._api.last_model_id or self._api.model
+        return ""
+
+    @property
+    def collected_predictions(self) -> list[str]:
+        """Predictions collected during compression (for embedding in file)."""
+        return self._collected
 
     def feed_char(self, ch: str) -> None:
-        """Called after encoding/decoding a character to update state.
-
-        Also checks whether the prediction at this position was correct.
-        If not, marks the current chunk as diverged so boost_distribution
-        stops boosting for the remainder of the chunk.
-        """
+        """Called after encoding/decoding a character to update state."""
         predicted = self._get_predicted_char()
         if predicted is not None and predicted != ch:
             self._chunk_diverged = True
@@ -94,54 +119,55 @@ class LlmCharPredictor:
         char_to_id: dict[str, int],
     ) -> list[float]:
         """Return a modified probability distribution that boosts the LLM
-        prediction (if available) in the PPM distribution.
-
-        Returns ppm_probs unchanged when:
-          - No prediction available
-          - Prediction diverged from actual text (stop-on-mismatch)
-          - Predicted char not yet in vocabulary
-        """
+        prediction (if available) in the PPM distribution."""
         if self._chunk_diverged:
             return ppm_probs
-
         predicted_char = self._get_predicted_char()
-        if predicted_char is None:
+        if predicted_char is None or predicted_char not in char_to_id:
             return ppm_probs
-
-        if predicted_char not in char_to_id:
-            return ppm_probs
-
         boosted_id = char_to_id[predicted_char]
         return _boost_prob(ppm_probs, boosted_id, CHAR_BOOST)
 
     def ensure_cache(self) -> None:
-        """Refresh the prediction cache if needed (start of chunk boundary).
-
-        Called at deterministic positions so encoder/decoder stay in sync.
-        Must be called BEFORE boost_distribution for each character.
-        Refreshes when: cache exhausted OR chunk size limit reached.
-        """
-        offset_in_chunk = self._pos - self._chunk_start
-        if offset_in_chunk >= len(self._predicted_chars) or offset_in_chunk >= self._chunk_chars:
+        """Refresh the prediction cache if needed."""
+        if not self._initialized:
+            self._refresh_cache()
+            self._initialized = True
+        elif self._pos - self._chunk_start >= self._chunk_chars:
             self._refresh_cache()
 
+    def cleanup(self) -> None:
+        """No-op (kept for interface compatibility)."""
+
     # ------------------------------------------------------------------
+
+    def _refresh_cache(self) -> None:
+        """Load the next chunk's predictions — from cache or API."""
+        if self._prediction_cache is not None:
+            # Decompression path: read from embedded cache
+            if self._cache_idx < len(self._prediction_cache):
+                self._predicted_chars = self._prediction_cache[self._cache_idx]
+                self._cache_idx += 1
+            else:
+                self._predicted_chars = ""
+        else:
+            # Compression path: call API
+            ctx = self._actual_text
+            if len(ctx) > MAX_CONTEXT_LEN:
+                ctx = ctx[-MAX_CONTEXT_LEN:]
+            result = self._api.generate_continuation(ctx, self._max_tokens)
+            self._predicted_chars = result.generated_text
+            if self._collect_cache:
+                self._collected.append(self._predicted_chars)
+
+        self._chunk_start = self._pos
+        self._chunk_diverged = False
 
     def _get_predicted_char(self) -> str | None:
         offset = self._pos - self._chunk_start
         if 0 <= offset < len(self._predicted_chars):
             return self._predicted_chars[offset]
         return None
-
-    def _refresh_cache(self) -> None:
-        context = self._actual_text
-        if len(context) > MAX_CONTEXT_LEN:
-            context = context[-MAX_CONTEXT_LEN:]
-
-        result = self._api.generate_continuation(context, max_tokens=200)
-        self._predicted_chars = result.generated_text
-        self._chunk_start = self._pos
-        self._chunk_diverged = False  # reset for new chunk
 
 
 # ---------------------------------------------------------------------------
@@ -151,55 +177,62 @@ class LlmCharPredictor:
 @dataclass
 class TokenMatch:
     """Result of matching a generated token against actual text."""
-
     matched: bool
     token_text: str
-    token_rank: int             # rank in top-k (0 = top-1), -1 if not found
+    token_rank: int
     token_logprob: float
     top_alternatives: list[tuple[str, float]]
-    chars_consumed: int         # how many chars of actual text this covers
+    chars_consumed: int
 
 
 class LlmTokenPredictor:
     """Token-level predictor that matches API-generated tokens against text.
 
-    Algorithm:
-      1. Call API to generate continuation.
-      2. Walk through generated tokens, comparing each token's text against
-         the actual text at the current position.
-      3. MATCH → the actual text starts with this token's text.
-         MISMATCH → the actual text diverges; remaining tokens are invalid.
-      4. For matched tokens, build a CDF from top-k logprobs.
-      5. For mismatched regions, signal the caller to fall back to
-         character-level encoding.
-
-    Encoder and decoder maintain identical state because both feed the
-    same actual/decoded text and make API calls at identical positions.
+    v0.3.1: accepts ``max_tokens`` to tune generation length.  Supports
+    prediction cache for API-free decompression (stores full ChunkResult
+    generated_text + token logprobs).
     """
 
-    def __init__(self, api_client: DeepSeekClient) -> None:
+    def __init__(
+        self,
+        api_client: DeepSeekClient | None = None,
+        chunk_chars: int | None = None,
+        max_tokens: int | None = None,
+        full_text: str | None = None,
+        prediction_cache: list[ChunkResult] | None = None,
+        collect_cache: bool = False,
+    ) -> None:
         self._api = api_client
+        self._max_tokens = max_tokens if max_tokens is not None else MAX_TOKENS_DEFAULT
 
-        # Cache from last API call
         self._chunk: ChunkResult | None = None
-        self._token_idx: int = 0        # index into chunk.tokens
-        self._chunk_start: int = 0      # char position where chunk begins
-        self._pos: int = 0              # current char position
-        self._diverged: bool = False    # True after first mismatch in chunk
-
+        self._token_idx: int = 0
+        self._chunk_start: int = 0
+        self._pos: int = 0
+        self._diverged: bool = False
         self._actual_text: str = ""
+
+        # --- Prediction cache ---
+        self._prediction_cache = prediction_cache
+        self._cache_idx: int = 0
+        self._collect_cache = collect_cache
+        self._collected: list[ChunkResult] = []
 
     @property
     def model_name(self) -> str:
-        return self._api.last_model_id or self._api.model
+        if self._api:
+            return self._api.last_model_id or self._api.model
+        return ""
+
+    @property
+    def collected_predictions(self) -> list:
+        return self._collected
 
     def feed_chars(self, text: str) -> None:
-        """Called after encoding/decoding characters to update state."""
         self._actual_text += text
         self._pos += len(text)
 
     def needs_refresh(self) -> bool:
-        """True when we need a new API call (cache empty or diverged)."""
         if self._chunk is None:
             return True
         if self._diverged:
@@ -209,22 +242,26 @@ class LlmTokenPredictor:
         return False
 
     def refresh_cache(self) -> None:
-        """Make a new API call with current context."""
-        context = self._actual_text
-        if len(context) > MAX_CONTEXT_LEN:
-            context = context[-MAX_CONTEXT_LEN:]
+        """Make a new API call or read from cache."""
+        if self._prediction_cache is not None:
+            if self._cache_idx < len(self._prediction_cache):
+                self._chunk = self._prediction_cache[self._cache_idx]
+                self._cache_idx += 1
+            else:
+                self._chunk = None
+        else:
+            ctx = self._actual_text
+            if len(ctx) > MAX_CONTEXT_LEN:
+                ctx = ctx[-MAX_CONTEXT_LEN:]
+            self._chunk = self._api.generate_continuation(ctx, self._max_tokens)
+            if self._collect_cache:
+                self._collected.append(self._chunk)
 
-        self._chunk = self._api.generate_continuation(context, max_tokens=200)
         self._token_idx = 0
         self._chunk_start = self._pos
         self._diverged = False
 
     def try_match_next_token(self, actual_text_remaining: str) -> TokenMatch | None:
-        """Try to match the next generated token against actual text.
-
-        Returns None if cache is empty/diverged (caller should refresh or
-        fall back to character-level).
-        """
         if self._chunk is None or self._diverged:
             return None
         if self._token_idx >= len(self._chunk.tokens):
@@ -234,68 +271,50 @@ class LlmTokenPredictor:
         token_text = gen_token.text
 
         if actual_text_remaining.startswith(token_text):
-            # MATCH — find rank of this token in top alternatives
             rank = _find_token_rank(token_text, gen_token.top_alternatives)
             self._token_idx += 1
             return TokenMatch(
-                matched=True,
-                token_text=token_text,
-                token_rank=rank,
+                matched=True, token_text=token_text, token_rank=rank,
                 token_logprob=gen_token.logprob,
                 top_alternatives=gen_token.top_alternatives,
                 chars_consumed=len(token_text),
             )
 
-        # Check if actual text matches any top alternative
         for alt_text, alt_logprob in gen_token.top_alternatives:
             if actual_text_remaining.startswith(alt_text):
                 rank = _find_token_rank(alt_text, gen_token.top_alternatives)
                 self._token_idx += 1
-                # Mark diverged — subsequent token predictions are invalid
                 self._diverged = True
                 return TokenMatch(
-                    matched=True,
-                    token_text=alt_text,
-                    token_rank=rank,
+                    matched=True, token_text=alt_text, token_rank=rank,
                     token_logprob=alt_logprob,
                     top_alternatives=gen_token.top_alternatives,
                     chars_consumed=len(alt_text),
                 )
 
-        # No match at all — diverge
         self._diverged = True
         return None
 
     def build_token_probs(
-        self,
-        top_alternatives: list[tuple[str, float]],
+        self, top_alternatives: list[tuple[str, float]],
     ) -> tuple[list[float], list[str]]:
-        """Build a probability distribution over tokens from top-k logprobs.
-
-        Returns (probs, token_strings) where probs[i] corresponds to
-        token_strings[i].  An extra "catch-all" entry is appended for
-        tokens not in the top-k.
-        """
         real_alts: list[tuple[str, float]] = []
         total_real = 0.0
         for tok, lp in top_alternatives:
-            p = math.exp(lp) if lp > -100 else 0.0  # ignore -9999 entries
+            p = math.exp(lp) if lp > -100 else 0.0
             if p > MIN_PROB_FLOOR:
                 real_alts.append((tok, p))
                 total_real += p
-
         if not real_alts:
-            # No useful alternatives — return uniform over catch-all
             return [1.0], ["<CATCHALL>"]
-
         remainder = max(1.0 - total_real, MIN_PROB_FLOOR)
         token_strings = [tok for tok, _ in real_alts] + ["<CATCHALL>"]
         probs = [p for _, p in real_alts] + [remainder]
-
-        # Normalize
         s = sum(probs)
-        probs = [p / s for p in probs]
-        return probs, token_strings
+        return [p / s for p in probs], token_strings
+
+    def cleanup(self) -> None:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +322,6 @@ class LlmTokenPredictor:
 # ---------------------------------------------------------------------------
 
 def _boost_prob(probs: list[float], boost_id: int, boost_factor: float) -> list[float]:
-    """Multiply probs[boost_id] by boost_factor, then re-normalize."""
     result = list(probs)
     result[boost_id] = max(result[boost_id] * boost_factor, MIN_PROB_FLOOR)
     total = sum(result)
@@ -313,7 +331,6 @@ def _boost_prob(probs: list[float], boost_id: int, boost_factor: float) -> list[
 
 
 def _find_token_rank(token_text: str, alternatives: list[tuple[str, float]]) -> int:
-    """Find the rank (0-indexed) of token_text in the alternatives list."""
     for i, (alt_text, _) in enumerate(alternatives):
         if alt_text == token_text:
             return i

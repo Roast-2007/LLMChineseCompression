@@ -54,6 +54,7 @@ class ApiClient:
         self._client = OpenAI(
             api_key=api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
             base_url=base_url,
+            timeout=60.0,  # prevent hanging on slow API
         )
         self.last_model_id: str = ""  # set after each API call
 

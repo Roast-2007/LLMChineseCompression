@@ -76,15 +76,27 @@ def encode_online_char(
     on_progress=None,
     priors: dict[str, float] | None = None,
     max_order: int = 4,
-) -> bytes:
-    """Encode text using adaptive PPM boosted by LLM character predictions."""
+    chunk_chars: int | None = None,
+    max_tokens: int | None = None,
+) -> tuple[bytes, list[str]]:
+    """Encode text using adaptive PPM boosted by LLM character predictions.
+
+    Returns ``(compressed_body, prediction_cache)`` where prediction_cache
+    is the list of generated texts to embed in the .ztxt file for
+    API-free decompression (v0.3.1).
+    """
     from .predictor.llm import LlmCharPredictor
 
     buf = io.BytesIO()
     out = BitOutputStream(buf)
     encoder = ArithmeticEncoder(out)
     predictor = AdaptivePredictor(priors=priors, max_order=max_order)
-    llm = LlmCharPredictor(api_client)
+    llm = LlmCharPredictor(
+        api_client,
+        chunk_chars=chunk_chars,
+        max_tokens=max_tokens,
+        collect_cache=True,
+    )
 
     for i, ch in enumerate(text):
         llm.ensure_cache()
@@ -111,7 +123,7 @@ def encode_online_char(
             on_progress(i + 1, len(text))
 
     encoder.finish()
-    return buf.getvalue()
+    return buf.getvalue(), llm.collected_predictions
 
 
 # ------------------------------------------------------------------
@@ -124,6 +136,8 @@ def encode_online_token(
     on_progress=None,
     priors: dict[str, float] | None = None,
     max_order: int = 4,
+    chunk_chars: int | None = None,
+    max_tokens: int | None = None,
 ) -> bytes:
     """Token-level online encoding.
 
@@ -137,69 +151,76 @@ def encode_online_token(
     out = BitOutputStream(buf)
     encoder = ArithmeticEncoder(out)
     predictor = AdaptivePredictor(priors=priors, max_order=max_order)
-    llm = LlmTokenPredictor(api_client)
+    llm = LlmTokenPredictor(
+        api_client,
+        max_tokens=max_tokens,
+        collect_cache=True,
+    )
 
     pos = 0
-    while pos < len(text):
-        if llm.needs_refresh():
-            llm.refresh_cache()
+    try:
+        while pos < len(text):
+            if llm.needs_refresh():
+                llm.refresh_cache()
 
-        remaining = text[pos:]
-        match = llm.try_match_next_token(remaining)
+            remaining = text[pos:]
+            match = llm.try_match_next_token(remaining)
 
-        if match is not None and match.matched:
-            _encode_tag(encoder, TAG_TOKEN)
+            if match is not None and match.matched:
+                _encode_tag(encoder, TAG_TOKEN)
 
-            probs, token_strings = llm.build_token_probs(match.top_alternatives)
-            rank = -1
-            for idx, ts in enumerate(token_strings):
-                if ts == match.token_text:
-                    rank = idx
-                    break
-            if rank == -1:
-                rank = len(token_strings) - 1
+                probs, token_strings = llm.build_token_probs(match.top_alternatives)
+                rank = -1
+                for idx, ts in enumerate(token_strings):
+                    if ts == match.token_text:
+                        rank = idx
+                        break
+                if rank == -1:
+                    rank = len(token_strings) - 1
 
-            cdf = probs_to_cdf(probs, len(probs))
-            encoder.encode(cdf, rank)
+                cdf = probs_to_cdf(probs, len(probs))
+                encoder.encode(cdf, rank)
 
-            for ch in match.token_text:
-                _update_predictor_for_char(predictor, ch)
+                for ch in match.token_text:
+                    _update_predictor_for_char(predictor, ch)
 
-            llm.feed_chars(match.token_text)
-            if on_progress:
-                on_progress(min(pos + match.chars_consumed, len(text)), len(text))
-            pos += match.chars_consumed
-        else:
-            fallback_end = min(pos + MAX_FALLBACK_LEN, len(text))
+                llm.feed_chars(match.token_text)
+                if on_progress:
+                    on_progress(min(pos + match.chars_consumed, len(text)), len(text))
+                pos += match.chars_consumed
+            else:
+                fallback_end = min(pos + MAX_FALLBACK_LEN, len(text))
 
-            _encode_tag(encoder, TAG_CHARS)
-            n_chars = fallback_end - pos
-            count_cdf = uniform_cdf(MAX_FALLBACK_LEN)
-            encoder.encode(count_cdf, n_chars - 1)
+                _encode_tag(encoder, TAG_CHARS)
+                n_chars = fallback_end - pos
+                count_cdf = uniform_cdf(MAX_FALLBACK_LEN)
+                encoder.encode(count_cdf, n_chars - 1)
 
-            for j in range(pos, fallback_end):
-                ch = text[j]
-                if predictor.has_char(ch):
-                    sid = predictor.char_to_id(ch)
-                    probs = predictor.predict([])
-                    cdf = probs_to_cdf(probs, predictor.vocab_size())
-                    encoder.encode(cdf, sid)
-                    predictor.update(sid)
-                else:
-                    probs = predictor.predict([])
-                    cdf = probs_to_cdf(probs, predictor.vocab_size())
-                    encoder.encode(cdf, ESCAPE_ID)
-                    predictor.update(ESCAPE_ID)
-                    _encode_codepoint(encoder, ord(ch))
-                    predictor.add_char(ch)
+                for j in range(pos, fallback_end):
+                    ch = text[j]
+                    if predictor.has_char(ch):
+                        sid = predictor.char_to_id(ch)
+                        probs = predictor.predict([])
+                        cdf = probs_to_cdf(probs, predictor.vocab_size())
+                        encoder.encode(cdf, sid)
+                        predictor.update(sid)
+                    else:
+                        probs = predictor.predict([])
+                        cdf = probs_to_cdf(probs, predictor.vocab_size())
+                        encoder.encode(cdf, ESCAPE_ID)
+                        predictor.update(ESCAPE_ID)
+                        _encode_codepoint(encoder, ord(ch))
+                        predictor.add_char(ch)
 
-            llm.feed_chars(text[pos:fallback_end])
-            if on_progress:
-                on_progress(min(fallback_end, len(text)), len(text))
-            pos = fallback_end
+                llm.feed_chars(text[pos:fallback_end])
+                if on_progress:
+                    on_progress(min(fallback_end, len(text)), len(text))
+                pos = fallback_end
+    finally:
+        llm.cleanup()
 
     encoder.finish()
-    return buf.getvalue()
+    return buf.getvalue(), llm.collected_predictions
 
 
 # ------------------------------------------------------------------

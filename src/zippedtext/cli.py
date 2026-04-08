@@ -143,7 +143,14 @@ def d(
     header, model_data, _ = read_file(data)
     cfg = resolve_config(cli_api_key=api_key, cli_base_url=base_url)
 
-    if header.mode == MODE_ONLINE and not cfg.api_key:
+    # Check if file has embedded prediction cache (v0.3.1+)
+    has_cache = False
+    if header.mode == MODE_ONLINE and model_data:
+        from .compressor import _unpack_online_model_data
+        _, _, _, _, cc, tc = _unpack_online_model_data(model_data)
+        has_cache = cc is not None or tc is not None
+
+    if header.mode == MODE_ONLINE and not cfg.api_key and not has_cache:
         click.echo(
             "Error: this file was compressed in online mode.\n"
             "  Provide --api-key, set env var, or run: zippedtext config init",
@@ -154,7 +161,7 @@ def d(
     # Warn if model mismatch
     if header.mode == MODE_ONLINE and model_data:
         from .compressor import _unpack_online_model_data
-        _, file_model = _unpack_online_model_data(model_data)
+        _, file_model, _, _, _, _ = _unpack_online_model_data(model_data)
         if file_model and file_model != cfg.model:
             click.echo(
                 f"Warning: file was compressed with model '{file_model}', "
@@ -227,11 +234,17 @@ def info(input_file: str) -> None:
     # Online mode extra info
     if header.mode == MODE_ONLINE and model_data:
         from .compressor import _unpack_online_model_data, SUB_MODE_TOKEN
-        sub_mode, api_model = _unpack_online_model_data(model_data)
+        sub_mode, api_model, chunk_chars, max_tokens, char_cache, tok_cache = (
+            _unpack_online_model_data(model_data)
+        )
         sub_str = "token" if sub_mode == SUB_MODE_TOKEN else "char"
         click.echo(f"  Sub-mode:       {sub_str}")
         if api_model:
             click.echo(f"  API model:      {api_model}")
+        click.echo(f"  Chunk chars:    {chunk_chars}")
+        click.echo(f"  Max tokens:     {max_tokens}")
+        has_cache = char_cache is not None or tok_cache is not None
+        click.echo(f"  Pred. cache:    {'yes (API-free decompress)' if has_cache else 'no'}")
 
 
 @main.command()

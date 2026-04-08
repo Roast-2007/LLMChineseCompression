@@ -260,14 +260,18 @@ def test_chunk_boundary():
     """Verify correct behavior when text spans multiple API chunks."""
     from zippedtext.compressor import compress, decompress
 
-    # Use a very small chunk size to force multiple API calls
+    # Use a very small chunk size to force multiple API calls.
+    # Must patch both llm module AND compressor module (separate bindings).
     text = "你好世界测试文本压缩算法验证"
     fake = FakeApiClient("你好世界测试文本压缩算法验证")
 
-    # Temporarily reduce chunk size
+    import zippedtext.compressor as comp_mod
     import zippedtext.predictor.llm as llm_mod
-    orig_chunk = llm_mod.CHUNK_CHARS
-    llm_mod.CHUNK_CHARS = 4  # very small chunks
+    orig_llm = llm_mod.CHUNK_CHARS
+    orig_comp = comp_mod.CHUNK_CHARS
+
+    llm_mod.CHUNK_CHARS = 4
+    comp_mod.CHUNK_CHARS = 4
 
     try:
         compressed = compress(text, mode="online", api_client=fake, sub_mode="char")
@@ -277,7 +281,8 @@ def test_chunk_boundary():
         # Should have made multiple API calls
         assert fake.call_count >= 2
     finally:
-        llm_mod.CHUNK_CHARS = orig_chunk
+        llm_mod.CHUNK_CHARS = orig_llm
+        comp_mod.CHUNK_CHARS = orig_comp
 
 
 # ---------------------------------------------------------------------------

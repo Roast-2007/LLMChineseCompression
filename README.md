@@ -4,13 +4,11 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 LLM API 后可进一步提升。
 
+**v0.3.4 新增**：structured online 第三阶段聚焦 schema-seeded typed slot codec：analysis manifest 新增 `document_family` / `block_families` / `field_schemas` / `slot_hints` / `enum_candidates`，template slot 开始支持 `identifier` / `version` / `path_or_url` / `enum` / `number_with_unit`，`info` / `bench` 新增 typed slot 与 template family 可观测性，`bench` 现在同时展示 public structured 结果和 raw structured diagnostic。
+
 **v0.3.3 新增**：structured online 第二阶段优化：analysis priors 真正接入 structured coder、list/table/config 行级切分、hint-aware template detection、phrase 排序增强、更细 fallback reason 与 structured API smoke test。
 
-**v0.3.1 新增**：在线模式性能优化（压缩速度 13× 提升、解压缩速度 1200× 提升）、预测缓存嵌入（解压无需 API）、智能回退（自动选择最优模式）。
-
-**v0.3.0 新增**：中文字符频率先验、短语级编码、代码生成模式（实验性）、多平台 API 支持（SiliconFlow 硅基流动等）、交互式配置系统。
-
-> v0.3.3 继续沿着 structured online 主线推进：重点不再是继续压 side info，而是提升 template / phrase 命中率、让 stored analysis 真正参与编码收益，并提高 API 文档、配置行、列表、表格这类结构化文本上的 route 收益。
+> v0.3.4 继续沿着 structured online 主线推进：重点不再是压更多 side info，而是让 LLM 提供更接近 schema 的结构提示，并把 template slot 从普通字符串升级为 typed slot，让 API 文档、配置行、版本号、URL/path、枚举值这类结构化文本获得更直接的压缩收益。
 
 ## 当前 online 模式说明
 
@@ -18,10 +16,10 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 1. **structured online（默认）**
    - 压缩期调用 LLM 做结构分析；
-   - 让 LLM 参与短语/术语提示、语言片段提示、segment routing；
+   - analysis manifest 不再只有 `template_hints`，而是可携带 document/block/schema/slot hints；
    - analysis 中的字符先验会与本地 priors 合并后参与 structured literal / phrase / template residual coder；
    - `list` / `table` / `config` 块会优先按行切分，提高 template route 命中机会；
-   - template detection 会结合 `template_hints`、catalog reuse 与 gain 共同决策；
+   - template route 仍然采用 `template_id + slot payload + residual`，但 slot 已可优先走 typed slot codec；
    - 结果写入 `.ztxt` v3 的结构化 side info section；
    - **解压不依赖 API**。
 
@@ -30,8 +28,6 @@ LLM 增强的无损中英文纯文本压缩工具。
    - `--sub-mode token`
    - 保留旧版 next-token / char boost + prediction cache 路径，用于对比和兼容旧思路。
 
-> v0.3.2 开始，online mode 不再只是“让 LLM 续写然后给 PPM 打补丁”，而是让 LLM 开始参与分段、字典构建、结构化 side info 设计与压缩模式选择。
-
 ## 工作原理
 
 1. **自适应 PPM 预测器**：维护多阶（order-0 到 order-6 可配置）字符级 n-gram 模型，在编码/解码过程中实时学习文本的统计规律。
@@ -39,12 +35,12 @@ LLM 增强的无损中英文纯文本压缩工具。
 3. **短语级编码**：自动识别高频短语（2-8 字符），将其作为单一符号编码。
 4. **structured online（当前主路径）**：
    - LLM 一次性分析全文；
-   - 生成字符频率、短语/术语候选、语言片段提示、template hints；
+   - 生成字符频率、短语/术语候选、语言片段提示、template hints，以及 document/schema/slot 级提示；
    - 本地分段；对 `list` / `table` / `config` 优先做行级切分；
    - analysis 中的字符先验会与本地 priors 融合，进入 structured literal / phrase / template residual 编解码；
    - phrase table 会综合 heuristic phrases、LLM phrase hints、top bigrams 与 char frequencies 做排序；
+   - template route 仍然采用 `template_id + typed slot payload + residual`，slot value 可按 `version` / `path_or_url` / `enum` / `number_with_unit` / `identifier` 等类型压缩；
    - 本地用 gain estimator 在 literal / phrase / template 之间做净收益选路，并记录更细的 fallback reason；
-   - template route 采用 `template_id + slot values + residual`，residual 继续复用现有 literal / phrase coder；
    - analysis / dictionary / templates / segment metadata / stats 写入 `.ztxt` v3 typed sections；
    - 解压时不访问远端 API，只依赖文件内 side info 和确定性本地 coder。
 5. **legacy online char/token**：保留旧版 prediction-cache 方案，用于兼容和效果对比。
@@ -130,6 +126,10 @@ zippedtext bench input.txt
 zippedtext bench input.txt --api-key sk-your-key
 ```
 
+其中 `bench` 现在会同时显示：
+- public `compress(..., mode="online", sub_mode="structured")` 的最终结果
+- raw structured diagnostic（便于观察 whole-file fallback 之前的真实 structured payload / side info 结构）
+
 ## CLI 命令参考
 
 ### `zippedtext c` — 压缩
@@ -168,7 +168,7 @@ zippedtext bench input.txt --api-key sk-your-key
 - 格式版本（v2 / v3）
 - online 路径类型（structured / legacy-char / legacy-token）
 - structured online 的 analysis / dictionary / templates / segment / stats 拆解
-- route 分布、template hit、residual bytes、side info total
+- route 分布、template hit、typed slot / typed template 统计、template family 统计、residual bytes、side info total
 - 是否可 API-free 解压
 
 ### `zippedtext bench` — 基准测试
@@ -178,11 +178,14 @@ zippedtext bench input.txt --api-key sk-your-key
 - zstd -19
 - zippedtext offline
 - zippedtext online (structured)
+- structured raw diagnostic
 - zippedtext online (legacy char)
 - zippedtext online (legacy token)
 
 其中 structured online 会额外显示：
 - side info / payload / residual 成本
+- typed slot / typed template 统计
+- template family 分布
 - route 分布
 - 若 whole-file 最终回退 offline，则显示 fallback 差值与 loss reason
 
@@ -206,10 +209,6 @@ client = ApiClient(
 
 # structured online
 data = compress(text, mode="online", api_client=client, sub_mode="structured")
-assert decompress(data) == text
-
-# legacy online char
-data = compress(text, mode="online", api_client=client, sub_mode="char")
 assert decompress(data) == text
 ```
 
@@ -246,9 +245,14 @@ Offset  Size    Field
 - route stats section
 - payload body
 
-section entry 自带 flags，可选择 raw / zstd codec；读取时会保留 section flags 与 stored size。
+analysis section 现在可增量承载：
+- `document_family`
+- `block_families`
+- `field_schemas`
+- `slot_hints`
+- `enum_candidates`
 
-这让 online mode 可以存储**压缩友好的结构化决策信息**，而不是直接缓存原始生成文本。
+这让 online mode 存储的是**压缩友好的结构化决策信息**，而不是原始生成文本本身。
 
 ## 项目结构
 
@@ -271,7 +275,7 @@ src/zippedtext/
 ├── api_client.py           # API 客户端（OpenAI 协议兼容）
 ├── online_manifest.py      # structured online manifest / stats
 ├── sideinfo_codec.py       # section codec / side info helpers
-├── template_codec.py       # template catalog / template payload codec
+├── template_codec.py       # template catalog / typed slot payload codec
 ├── residual.py             # residual payload packing / reuse of literal+phrase coder
 ├── gain_estimator.py       # segment gain estimation / route scoring
 ├── segment.py              # segment splitter / classifier
@@ -290,8 +294,8 @@ src/zippedtext/
 # 全部测试
 pytest tests/
 
-# structured online 新增测试
-pytest tests/test_analysis_manifest.py tests/test_router.py tests/test_online_structured.py tests/test_format_v3.py
+# structured online 重点回归
+pytest tests/test_analysis_manifest.py tests/test_router.py tests/test_template_codec.py tests/test_residual.py tests/test_gain_estimator.py tests/test_online_structured.py tests/test_format_v3.py tests/test_cli.py
 
 # legacy online mock 测试
 pytest tests/test_online.py
@@ -317,27 +321,61 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] ~~LLM 辅助 term/phrase dictionary~~ (v0.3.2)
 - [x] ~~template codec~~ (v0.3.3)
 - [x] ~~residual architecture~~ (v0.3.3)
-- [ ] structured online 第二阶段优化（hint-aware template hit、line-level routing、analysis priors 利用）
+- [x] ~~schema-seeded typed slot codec~~ (v0.3.4)
+- [x] ~~bench / info / CLI 可观测性补强~~ (v0.3.4)
+- [ ] multi-line / record template family
+- [ ] document-level family clustering + global gain optimization
 - [ ] 本地确定性模型
 - [ ] Rust 核心加速（PyO3）
 
-### v0.3.3 — structured online 命中率与路由收益优化
+### v0.3.4 — schema-seeded typed slot structured online
 
-- analysis manifest 中的字符频率现在会真正并入 structured literal / phrase / template residual 编解码 priors
-- `segment.py` 现在会优先把 `list` / `table` / `config` 按行切分，提升 template route 命中机会
-- `template_codec.py` 现在支持 hint-aware scoring、多位数字列表前缀、TSV 表格行，并抑制明显的 key-value 误判
-- `build_template_catalog()` 现在会过滤明显 one-off 的模板，减少无效 template side info
-- `term_dictionary.py` 现在会结合 `phrase_dictionary`、`top_bigrams`、`char_frequencies` 改善 structured phrase 排序
-- `router.py` / `gain_estimator.py` 现在会保留更细的 fallback reason（如 `template no catalog reuse`）
-- 新增 structured online API smoke test，并保留 whole-file 自动 fallback offline 的现有行为
+- `ApiClient.analyze_text()` 现在可返回 `document_family` / `block_families` / `field_schemas` / `slot_hints` / `enum_candidates`
+- `online_manifest.py` 现在可持久化 schema/slot 级提示，并保持旧 payload 兼容
+- `template_codec.py` 现在支持 typed slot payload：
+  - `identifier`
+  - `version`
+  - `path_or_url`
+  - `enum`
+  - `number_with_unit`
+- template route 现在会把 typed slot payload 作为真实成本参与收益比较
+- `router.py` / `stats` 现在会记录 typed slot / typed template / template family 统计
+- `zippedtext info` / `bench` 现在可直接查看 typed slot 命中与 template family 分布
+- `bench` headline 结果改为走 public structured path，同时保留 raw structured diagnostic
+- 新增 CLI 测试与结构化样本 fixture
 
+## 常见问题
 
-### v0.3.2 — structured online 初步落地
+### Q: 为什么不继续把 legacy online 当主线优化？
 
-- 新增 **structured online** 主路径，并设为默认 online 子模式
-- 新增 `.ztxt` **v3** section 化格式
-- 新增 `segment.py` 与 `router.py`，支持 segment router
-- 新增 `online_manifest.py`，存储 analysis / segment / route stats
+因为 prediction cache 本质上仍然是在存“模型输出文本”，而不是压缩真正需要的最小结构化信息。
+
+### Q: structured online 为什么更符合长期方向？
+
+因为它让 LLM 参与：
+- 结构分析
+- 分段
+- gain-based 路由
+- 短语/术语发现
+- template codec
+- residual 架构
+- side info 设计
+- schema / slot hints
+
+而不是只做 fragile 的 next-token 预测。
+
+### Q: structured online 解压为什么不需要 API？
+
+因为 LLM 只参与编码期建模；解压期只依赖 `.ztxt` v3 中的结构化 side info 与本地确定性 coder。
+
+### Q: 为什么有时 `--mode online --sub-mode structured` 最后还是得到 offline 文件？
+
+因为 `compress()` 仍然会比较 whole-file 最终收益；如果 structured 结果不如 offline，小文件或结构收益不足的样本会自动回退 offline。这是预期行为，不是错误。
+
+### Q: 能否压缩二进制文件？
+
+不能。当前设计专为 Unicode 纯文本优化。
+
 - 新增 `term_dictionary.py`，把 LLM 分析结果接入短语/术语字典构建
 - `ApiClient.analyze_text()` 改为返回结构化 manifest，而不是裸 JSON
 - structured online 解压 **不依赖远端 API**

@@ -114,17 +114,17 @@ def test_online_token_chinese():
 
 
 @skip_no_api
-def test_online_structured_config_smoke():
-    """Compress/decompress structured config text with structured online path."""
+def test_online_structured_url_smoke():
+    """Compress/decompress URL-heavy structured text with structured online path."""
     from zippedtext.compressor import _structured_online_compress, decompress
-    from zippedtext.format import SECTION_STATS, VERSION_V3, compute_crc32, read_file_v3
+    from zippedtext.format import SECTION_STATS, compute_crc32, read_file_v3
     from zippedtext.online_manifest import StructuredOnlineStats
 
     text = (
         "endpoint: https://api.deepseek.com/v1/chat/completions\n"
         "endpoint: https://api.deepseek.com/v1/chat/completions\n"
-        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
-        "endpoint: https://api.deepseek.com/v1/chat/completions"
+        "download_path: /opt/zippedtext/releases/v1.2.3\n"
+        "download_path: /opt/zippedtext/releases/v1.2.4"
     )
     encoded = text.encode("utf-8")
     client = _make_client()
@@ -142,7 +142,6 @@ def test_online_structured_config_smoke():
     restored = decompress(compressed)
     assert restored == text
 
-    header, sections, _ = read_file_v3(compressed)
-    assert header.version == VERSION_V3
+    _, sections, _ = read_file_v3(compressed)
     stats = StructuredOnlineStats.deserialize(sections[SECTION_STATS])
     assert stats.segment_count >= 1

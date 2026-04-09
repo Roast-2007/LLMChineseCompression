@@ -437,6 +437,8 @@ def _structured_online_compress(
         phrase_count=len(phrase_table.phrases),
         template_count=len(template_catalog.entries),
         template_hit_count=route_summary.template_hit_count,
+        typed_slot_count=route_summary.typed_slot_count,
+        typed_template_count=route_summary.typed_template_count,
         residual_bytes=route_summary.residual_bytes,
         analysis_bytes=section_stored_size(analysis_section),
         dictionary_bytes=section_stored_size(phrase_section),
@@ -445,6 +447,7 @@ def _structured_online_compress(
         payload_bytes=payload_bytes,
         route_counts=route_summary.route_counts,
         reason_counts=route_summary.reason_counts,
+        template_family_counts=route_summary.template_family_counts,
         estimated_gain_bytes=route_summary.estimated_gain_bytes,
         literal_payload_bytes=route_summary.literal_payload_bytes,
     )
@@ -512,6 +515,7 @@ def _structured_online_decompress(
                 record.char_count,
                 priors=effective_priors,
                 max_order=max_order,
+                analysis=analysis,
             )
         else:
             text = decode(

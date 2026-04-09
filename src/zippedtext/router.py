@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from .encoder import encode, encode_with_phrases
@@ -27,6 +28,8 @@ class RoutedSegment:
     encoded_bytes: int
     estimated_gain_bytes: int
     residual_bytes: int = 0
+    typed_slot_count: int = 0
+    typed_template_count: int = 0
     fallback_reason: str = ""
 
 
@@ -39,6 +42,9 @@ class RouteSummary:
     literal_payload_bytes: int
     residual_bytes: int
     template_hit_count: int
+    typed_slot_count: int
+    typed_template_count: int
+    template_family_counts: tuple[tuple[str, int], ...]
 
 
 def route_segments(
@@ -64,13 +70,21 @@ def route_segments(
     literal_payload_bytes = 0
     estimated_gain_bytes = 0
     residual_bytes = 0
+    typed_slot_count = 0
+    typed_template_count = 0
+    template_family_counter: Counter[str] = Counter()
 
     phrase_amortized_cost = _amortize_cost(phrase_section_cost, len(segments))
-    template_amortized_cost = _amortize_cost(template_section_cost, len(segments))
     template_index_map = {
         entry: index
         for index, entry in enumerate(template_catalog.entries)
     } if template_catalog else {}
+    family_counts = Counter(
+        f"{match.template_kind}:{match.skeleton}"
+        for segment in segments
+        for match in [detect_template(text[segment.start:segment.end], analysis)]
+        if match is not None and (match.template_kind, match.skeleton) in template_index_map
+    )
 
     for segment in segments:
         segment_text = text[segment.start:segment.end]
@@ -114,6 +128,7 @@ def route_segments(
                 )
             )
 
+        chosen_match = None
         if template_catalog and template_route_allowed(segment.kind):
             match = detect_template(segment_text, analysis)
             if match:
@@ -136,7 +151,11 @@ def route_segments(
                             priors,
                             max_order,
                         )
-                        template_side_info = template_amortized_cost + config.route_switch_penalty_bytes
+                        family_key = f"{match.template_kind}:{match.skeleton}"
+                        template_side_info = _family_amortized_cost(
+                            template_section_cost,
+                            family_counts.get(family_key, 1),
+                        ) + config.route_switch_penalty_bytes
                         template_total = estimate_total_bytes(
                             template_payload.encoded_bytes,
                             template_side_info,
@@ -153,6 +172,7 @@ def route_segments(
                                 residual_bytes=template_payload.residual_bytes,
                             )
                         )
+                        chosen_match = match
 
         if literal_reason:
             candidates[0] = GainEstimate(
@@ -170,6 +190,15 @@ def route_segments(
         route_counts[decision.route] = route_counts.get(decision.route, 0) + 1
         estimated_gain_bytes += decision.estimated_gain_bytes
         residual_bytes += decision.residual_bytes
+        segment_typed_slots = 0
+        segment_typed_templates = 0
+        if decision.route == ROUTE_TEMPLATE and chosen_match is not None:
+            segment_typed_slots = sum(1 for slot_type in chosen_match.slot_types if slot_type != "string")
+            if segment_typed_slots:
+                segment_typed_templates = 1
+                typed_slot_count += segment_typed_slots
+                typed_template_count += 1
+                template_family_counter[f"{chosen_match.template_kind}:{chosen_match.skeleton}"] += 1
         if decision.route == ROUTE_LITERAL and decision.fallback_reason:
             reason_counts[decision.fallback_reason] = reason_counts.get(decision.fallback_reason, 0) + 1
         routed.append(
@@ -181,12 +210,15 @@ def route_segments(
                 encoded_bytes=decision.payload_bytes,
                 estimated_gain_bytes=decision.estimated_gain_bytes,
                 residual_bytes=decision.residual_bytes,
+                typed_slot_count=segment_typed_slots,
+                typed_template_count=segment_typed_templates,
                 fallback_reason=decision.fallback_reason,
             )
         )
 
     summary = tuple((route, count) for route, count in sorted(route_counts.items()) if count > 0)
     reasons = tuple(sorted(reason_counts.items(), key=lambda item: item[0]))
+    template_families = tuple(sorted(template_family_counter.items(), key=lambda item: item[0]))
     return RouteSummary(
         routed_segments=tuple(routed),
         route_counts=summary,
@@ -195,6 +227,9 @@ def route_segments(
         literal_payload_bytes=literal_payload_bytes,
         residual_bytes=residual_bytes,
         template_hit_count=route_counts.get(ROUTE_TEMPLATE, 0),
+        typed_slot_count=typed_slot_count,
+        typed_template_count=typed_template_count,
+        template_family_counts=template_families,
     )
 
 
@@ -202,3 +237,9 @@ def _amortize_cost(total_cost: int, segment_count: int) -> int:
     if total_cost <= 0 or segment_count <= 0:
         return 0
     return max(total_cost // segment_count, 1)
+
+
+def _family_amortized_cost(total_cost: int, family_count: int) -> int:
+    if total_cost <= 0 or family_count <= 0:
+        return 0
+    return max(total_cost // family_count, 1)

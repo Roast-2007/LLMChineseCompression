@@ -1,0 +1,8 @@
+name: zippedtext
+name: zippedtext
+release_channel: stable
+release_channel: beta
+download_path: /opt/zippedtext/releases/v1.2.3
+download_path: /opt/zippedtext/releases/v1.2.4
+cache_dir: C:/Users/demo/.cache/zippedtext
+cache_dir: C:/Users/demo/.cache/zippedtext

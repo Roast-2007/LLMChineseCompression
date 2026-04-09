@@ -12,7 +12,7 @@
 |------|-----|
 | 仓库 | `Roast-2007/LLMChineseCompression` |
 | 包名 | `zippedtext` |
-| 当前版本 | `0.3.3` |
+| 当前版本 | `0.3.4` |
 | Python | >= 3.12 |
 | 协议 | MIT |
 | 构建后端 | hatchling |
@@ -24,9 +24,11 @@
 
 1. **structured online（默认）**
    - LLM 在压缩期参与 analysis、分段、route、术语/短语发现；
+   - analysis manifest 已扩展到 document/schema/slot hints；
    - `.ztxt` v3 保存结构化 side info；
    - analysis manifest 中的字符先验会并入 structured coder；
    - `list` / `table` / `config` 会优先按行切分，提高 template route 命中率；
+   - template slot 已开始支持 typed slot codec；
    - 解压不依赖远端 API。
 
 2. **legacy online（兼容）**
@@ -62,47 +64,11 @@
 │         │                      │                  │         │
 │  ┌──────▼────────────┐  ┌──────▼────────────┐  ┌──────────▼─────────┐
 │  │ term_dictionary.py│  │ template_codec.py │  │ api_client.py       │
-│  │ 术语/短语字典生成  │  │ 模板/残差编码      │  │ LLM 分析接口         │
+│  │ 术语/短语字典生成  │  │ 模板/typed slot    │  │ LLM 分析接口         │
 │  └───────────────────┘  └───────────────────┘  └────────────────────┘
 └──────────────────────────┬────────────────────────────────────────────┘
                            ▼
                   format.py → .ztxt (v1 / v2 / v3)
-```
-
-### 文件清单与职责
-
-```text
-src/zippedtext/
-├── __init__.py                # 版本号
-├── __main__.py                # python -m zippedtext 入口
-├── cli.py                     # CLI 命令定义
-├── cli_config.py              # config 子命令组
-├── config.py                  # 配置系统
-├── provider.py                # API 平台预设
-├── compressor.py              # 核心：compress() / decompress()
-├── encoder.py                 # 编码逻辑
-├── decoder.py                 # 解码逻辑
-├── cdf_utils.py               # uniform CDF 工具
-├── codegen.py                 # 代码生成模式
-├── arithmetic.py              # 32-bit 整数算术编码器/解码器
-├── bitstream.py               # BitOutputStream / BitInputStream
-├── format.py                  # .ztxt 格式 v1 + v2 + v3
-├── api_client.py              # ApiClient（OpenAI 协议兼容）
-├── online_manifest.py         # structured online 元数据与统计
-├── sideinfo_codec.py          # v3 section codec / side info helper
-├── template_codec.py          # template catalog / payload codec
-├── residual.py                # residual 编码与解码辅助
-├── gain_estimator.py          # segment gain estimator
-├── segment.py                 # 文本分段与段类型分类
-├── router.py                  # segment route / 收益判断
-├── term_dictionary.py         # LLM + heuristic 短语/术语字典
-└── predictor/
-    ├── base.py                # Predictor 抽象基类
-    ├── adaptive.py            # ★ 核心：自适应 PPM 预测器
-    ├── priors.py              # 中文字符频率先验
-    ├── phrases.py             # 短语级编码
-    ├── llm.py                 # legacy online 预测器
-    └── ngram.py               # N-gram 预测器
 ```
 
 ### 关键设计决策
@@ -163,6 +129,13 @@ Offset  Size  Field
 - `SECTION_SEGMENTS`
 - `SECTION_STATS`
 
+analysis section 现在可增量携带：
+- `document_family`
+- `block_families`
+- `field_schemas`
+- `slot_hints`
+- `enum_candidates`
+
 section entry 自带 flags，可选择 raw / zstd codec；读取时会保留 section flags 与 stored size。
 
 ---
@@ -179,26 +152,22 @@ section entry 自带 flags，可选择 raw / zstd codec；读取时会保留 sec
 
 ### 3.2 发版步骤
 
-1. 确认所有测试通过：`pytest tests/`
-2. 更新版本号：`src/zippedtext/__init__.py` + `pyproject.toml`
-3. 更新 README / `docs/DEVELOPMENT.md` / roadmap 中的当前版本与正文状态
-4. 提交：`git commit -m "release: v0.X.X — 简要描述"`
-5. 打 tag：`git tag v0.X.X`
-6. Push：`git push origin main && git push origin v0.X.X`
-7. GitHub Release
-8. （可选）PyPI：`python -m build && twine upload dist/*`
+1. 确认所有本地回归通过：`pytest tests/`
+2. 使用真实 DeepSeek key 跑在线集成：`DEEPSEEK_API_KEY=... pytest tests/test_online_integration.py -v -s`
+3. 使用结构化样本跑 `zippedtext bench` 与 `c/info/d` 端到端校验
+4. 更新版本号：`src/zippedtext/__init__.py` + `pyproject.toml`
+5. 更新 README / `docs/DEVELOPMENT.md` / roadmap 中的当前版本与正文状态
+6. 提交：`git commit -m "release: v0.X.X — 简要描述"`
+7. 打 tag：`git tag v0.X.X`
+8. Push：`git push origin main && git push origin v0.X.X`
+9. GitHub Release
+10. （可选）PyPI：`python -m build && twine upload dist/*`
+
+> 注意：真实 API key 只能通过环境变量或 CLI 参数传入；不要把 key 字面值写入仓库、文档或脚本。
 
 ---
 
-## 4. 用户如何同步更新
-
-```bash
-pip install --upgrade git+https://github.com/Roast-2007/LLMChineseCompression.git
-```
-
----
-
-## 5. AI Agent 开发须知
+## 4. AI Agent 开发须知
 
 ### 环境设置
 
@@ -216,7 +185,8 @@ pip install -e ".[dev]"
 - [ ] 修改了 `arithmetic.py`？→ 必须用大词表（20000）测试
 - [ ] 新增依赖？→ 更新 `pyproject.toml`
 - [ ] 改了版本号？→ 两处同步
-- [ ] 修改了 structured route / template / residual？→ 验证 route reason、template hit 与 API-free 解压
+- [ ] 修改了 structured route / template / residual？→ 验证 route reason、template hit、typed slot 统计与 API-free 解压
+- [ ] 改了 `bench` / `info`？→ 确认 public path 输出与 raw diagnostic 一致可解释
 
 ### 核心不变量（不可违反）
 
@@ -230,14 +200,14 @@ pip install -e ".[dev]"
 
 ---
 
-## 6. 测试与验证
+## 5. 测试与验证
 
 ```bash
 # 全部测试
 pytest tests/
 
 # structured online 重点回归
-pytest tests/test_analysis_manifest.py tests/test_router.py tests/test_template_codec.py tests/test_residual.py tests/test_gain_estimator.py tests/test_online_structured.py tests/test_format_v3.py
+pytest tests/test_analysis_manifest.py tests/test_router.py tests/test_template_codec.py tests/test_residual.py tests/test_gain_estimator.py tests/test_online_structured.py tests/test_format_v3.py tests/test_cli.py
 
 # legacy online mock 测试
 pytest tests/test_online.py
@@ -254,50 +224,18 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - `tests/test_gain_estimator.py`
 - `tests/test_online_structured.py`
 - `tests/test_format_v3.py`
+- `tests/test_cli.py`
 - `tests/test_online_integration.py`
+
+建议的结构化 bench 样本：
+- `tests/sample_structured_api.txt`
+- `tests/sample_structured_config.txt`
 
 > 注：在当前 Windows + Python 3.14 环境下，`pytest` 结束阶段偶发 access violation 噪声，但新增与回归用例均已实际通过；问题更像解释器/环境级异常，而不是本次 structured online 逻辑错误。
 
 ---
 
-## 7. 路线图
-
-### v0.2.0 — DeepSeek API 在线模式 ✅
-
-- [x] online 模式（char + token 子模式）
-- [x] API 确定性保证
-- [x] 在线模式测试
-
-### v0.3.0 — 压缩率优化 + 多平台支持 ✅
-
-- [x] 中文字符频率先验
-- [x] 短语级编码
-- [x] order-5 / order-6 实验
-- [x] 代码生成模式
-- [x] 多平台 API 支持
-- [x] 交互式配置系统
-- [x] `.ztxt` v2
-
-### v0.3.1 — legacy online 性能优化 ✅
-
-- [x] `CHUNK_CHARS` 20 → 200
-- [x] prediction cache 嵌入 `.ztxt`
-- [x] 在线文件智能回退 offline
-- [x] model_data 存储 chunk_chars / max_tokens / prediction_cache
-- [x] 修复 DeepSeek API 长上下文非确定性问题
-
-### v0.3.2 — structured online 初步落地 ✅
-
-- [x] 冻结 `online-legacy-char`
-- [x] 冻结 `online-legacy-token`
-- [x] structured online 设为默认 online 子模式
-- [x] `ApiClient.analyze_text()` 返回结构化 manifest
-- [x] 引入 `segment.py`
-- [x] 引入 `router.py`
-- [x] 引入 `term_dictionary.py`
-- [x] 引入 `.ztxt` v3
-- [x] 引入 structured online 测试
-- [x] structured online API-free 解压
+## 6. 路线图
 
 ### v0.3.3 — structured online 第二阶段 ✅
 
@@ -309,48 +247,71 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] analysis priors 真正接入 structured coder
 - [x] `list` / `table` / `config` 的 line-level segmentation
 - [x] hint-aware template detection / catalog pruning / richer fallback reason
-- [x] `tests/test_template_codec.py`
-- [x] `tests/test_residual.py`
-- [x] `tests/test_gain_estimator.py`
 - [x] structured online API smoke test
+
+### v0.3.4 — schema-seeded typed slot structured online ✅
+
+- [x] `ApiClient.analyze_text()` 扩展到 document/schema/slot hints
+- [x] `AnalysisManifest` 支持 `document_family` / `block_families` / `field_schemas` / `slot_hints` / `enum_candidates`
+- [x] typed slot codec 初版：
+  - [x] `identifier`
+  - [x] `version`
+  - [x] `path_or_url`
+  - [x] `enum`
+  - [x] `number_with_unit`
+- [x] `router.py` / `stats` 记录 typed slot / typed template / template family 统计
+- [x] `zippedtext info` / `bench` 展示 typed slot 与 family 观测值
+- [x] `bench` headline 结果改为走 public structured path，并保留 raw structured diagnostic
+- [x] CLI 测试 + 结构化 fixture
 
 ### 后续仍未完成
 
-- [ ] 更完整模板体系（跨行列表、文档段模板、更多配置模板）
+- [ ] multi-line / record template family
+- [ ] document-level family clustering
+- [ ] global / family-level gain optimization 深化
+- [ ] entity / alias / bilingual term system
+- [ ] hierarchical residual
 - [ ] benchmark matrix 完整报表
-- [ ] mixture-of-experts probability layer
+- [ ] MoE probability layer
 - [ ] 本地确定性模型
-- [ ] Rust 核心（PyO3）
+
+---
+
+## 7. 当前判断
+
+`v0.3.4` 之后，structured online 的下一阶段重点已经更清晰：
+- 不应回头深挖 legacy char/token
+- 不应只继续做 prompt 微调
+- 更高 ROI 的方向是：
+  - multi-line / record template
+  - document-level family clustering
+  - typed residual 与更强的 family-level amortization
+  - entity / alias / bilingual term system
+
+一句话总结：
+
+> 继续让 LLM 帮压缩器找到“更短的可逆结构表示”，比让 LLM 多猜几个 next token 更重要。
 
 ---
 
 ## 8. 常见问题
 
-### Q: 为什么不继续把 legacy online 当主线优化？
+### Q: 为什么 structured online 仍可能最终回退到 offline？
 
-因为 prediction cache 本质上仍然是在存“模型输出文本”，而不是存压缩真正需要的最小结构化信息。
+因为 `compress()` 仍然会做 whole-file 最终比较；如果 structured 结果不如 offline，就会自动回退。这是预期行为。
 
-### Q: structured online 为什么更符合长期方向？
+### Q: 为什么 `bench` 现在同时显示 structured 和 raw diagnostic？
 
-因为它让 LLM 参与：
-- 结构分析
-- 分段
-- gain-based 路由
-- 短语/术语发现
-- template codec
-- residual 架构
-- side info 设计
+因为用户真正拿到的是 public `compress(...sub_mode="structured")` 的最终结果，但调优时还需要看到 whole-file fallback 前的 raw structured 表现，两者都需要可观测。
 
-而不是只做 fragile 的 next-token 预测。
+### Q: 下一步最值得做什么？
 
-### Q: structured online 解压为什么不需要 API？
+优先做：
+1. multi-line / record template family
+2. document-level family clustering + global gain optimization
+3. typed residual / entity-alias-term system
+4. 更完整 benchmark matrix
 
-因为 LLM 只参与编码期建模；解压期只依赖 `.ztxt` v3 中的结构化 side info 与本地确定性 coder。
+### Q: structured online 解压为什么仍然不需要 API？
 
-### Q: 为什么有时 `--mode online --sub-mode structured` 最后还是得到 offline 文件？
-
-因为 `compress()` 仍然会比较 whole-file 最终收益；如果 structured 结果不如 offline，小文件或结构收益不足的样本会自动回退 offline。这是预期行为，不是错误。
-
-### Q: 能否压缩二进制文件？
-
-不能。当前设计专为 Unicode 纯文本优化。
+因为 LLM 只参与编码期建模；解压期只依赖 `.ztxt` v3 中的 side info 与本地确定性 coder。

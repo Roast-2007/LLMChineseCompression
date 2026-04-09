@@ -160,9 +160,14 @@ class ApiClient:
 {{
   "char_frequencies": {{"字符": 频率, ...}},
   "top_bigrams": [["字符对", 频率], ...],
-  "phrase_dictionary": [["常用短语", 编号], ...],
+  "phrase_dictionary": ["常用短语", ...],
   "language_segments": [{{"start": 起始位置, "end": 结束位置, "lang": "zh"|"en"|"num"}}],
-  "template_hints": ["key_value", "list_prefix", "table_row"]
+  "template_hints": ["key_value", "list_prefix", "table_row"],
+  "document_family": "api_docs|config_docs|release_notes|faq|bilingual_terms|general",
+  "block_families": [{{"kind": "config|list|table|prose|mixed", "start": 起始位置, "end": 结束位置, "family": "块族名称"}}],
+  "field_schemas": [{{"field": "字段名", "slot_type": "identifier|version|path_or_url|enum|number_with_unit|string", "enum_candidates": ["可选值", ...]}}],
+  "slot_hints": [{{"template_kind": "key_value|list_prefix|table_row", "slot_index": 槽位编号, "slot_type": "identifier|version|path_or_url|enum|number_with_unit|string", "field": "可选字段名", "enum_candidates": ["可选值", ...]}}],
+  "enum_candidates": [{{"field": "字段名", "values": ["可选值", ...]}}]
 }}
 
 你的目标不是泛泛总结文本，而是给压缩器提供“可复用、可离散化、可在解码期本地恢复”的高价值提示。
@@ -173,12 +178,22 @@ class ApiClient:
 - 表格行、TSV/制表符分隔行
 - 中英术语对照或名称:说明这类行级模式
 
+额外要求：
+- document_family 只在高置信度时填写，否则可为空字符串
+- field_schemas / slot_hints 只输出真正有编码价值的类型提示，不要泛化乱猜
+- enum_candidates 只为明显的 status / mode / level / flag / type 类字段输出
+- 对 path_or_url / version / number_with_unit / identifier 这几类高价值 slot 优先识别
+
 要求：
 - char_frequencies 最多返回 64 项，只保留真正高频且有压缩价值的字符
 - top_bigrams 最多返回 32 项，只返回文本中真实高频、可复用的字符对
 - phrase_dictionary 最多返回 32 项，优先返回文本中重复出现或明显可复用的术语/短语
 - language_segments 只保留高价值片段，位置尽量准确
 - template_hints 只返回高置信度命中，不要为了覆盖面乱猜
+- block_families 最多返回 24 项
+- field_schemas 最多返回 24 项
+- slot_hints 最多返回 32 项
+- enum_candidates 最多返回 16 项
 - 如果文本主要是普通 prose，没有明显模板，就让 template_hints 为空数组
 - 只返回 JSON，不要任何解释
 

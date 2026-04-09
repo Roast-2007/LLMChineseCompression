@@ -1,0 +1,8 @@
+endpoint: https://api.deepseek.com/v1/chat/completions
+endpoint: https://api.deepseek.com/v1/chat/completions
+version: v1.2.3
+version: v1.2.4
+mode: online
+mode: offline
+retry_timeout: 30 ms
+payload_limit: 16 MB

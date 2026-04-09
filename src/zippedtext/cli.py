@@ -249,6 +249,10 @@ def info(input_file: str) -> None:
             click.echo(f"  Phrase count:     {stats.phrase_count}")
             click.echo(f"  Template count:   {stats.template_count}")
             click.echo(f"  Template hit:     {stats.template_hit_count}")
+            if stats.typed_slot_count:
+                click.echo(f"  Typed slots:      {stats.typed_slot_count}")
+            if stats.typed_template_count:
+                click.echo(f"  Typed templates:  {stats.typed_template_count}")
             click.echo(f"  Residual bytes:   {stats.residual_bytes}")
             click.echo(f"  Payload bytes:    {stats.payload_bytes}")
             click.echo(f"  Analysis bytes:   {stats.analysis_bytes}")
@@ -259,6 +263,9 @@ def info(input_file: str) -> None:
             if stats.route_counts:
                 route_text = ", ".join(f"{route}={count}" for route, count in stats.route_counts)
                 click.echo(f"  Routes:           {route_text}")
+            if stats.template_family_counts:
+                family_text = ", ".join(f"{family}={count}" for family, count in stats.template_family_counts)
+                click.echo(f"  Template families:{family_text}")
             if stats.reason_counts:
                 reason_text = ", ".join(f"{reason}={count}" for reason, count in stats.reason_counts)
                 click.echo(f"  Estimator notes:  {reason_text}")
@@ -318,6 +325,29 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
     api_client = _make_api_client(cfg)
     if api_client:
         t0 = time.perf_counter()
+        structured_final = compress(
+            text,
+            mode="online",
+            api_client=api_client,
+            model_name=cfg.model,
+            sub_mode="structured",
+        )
+        t_structured = time.perf_counter() - t0
+        click.echo(f"  {'zippedtext online (structured)':<30} {len(structured_final):>8,} {len(structured_final)/original:>8.3f}  ({t_structured:.2f}s)")
+        if read_file(structured_final)[0].version == VERSION_V3:
+            _, structured_sections, _ = read_file_v3(structured_final)
+            structured_stats = StructuredOnlineStats.deserialize(_section_data(structured_sections, SECTION_STATS))
+            click.echo(f"    side info={structured_stats.side_info_bytes:,} payload={structured_stats.payload_bytes:,} residual={structured_stats.residual_bytes:,}")
+            if structured_stats.typed_slot_count:
+                click.echo(f"    typed slots={structured_stats.typed_slot_count:,} typed templates={structured_stats.typed_template_count:,}")
+            if structured_stats.route_counts:
+                click.echo("    routes=" + ", ".join(f"{route}={count}" for route, count in structured_stats.route_counts))
+            if structured_stats.template_family_counts:
+                click.echo("    template families=" + ", ".join(f"{family}={count}" for family, count in structured_stats.template_family_counts))
+        else:
+            click.echo(f"    fallback=offline by {len(structured_final) - len(offline):,} bytes")
+
+        t0 = time.perf_counter()
         structured_raw = _structured_online_compress(
             text=text,
             text_bytes=text_bytes,
@@ -328,22 +358,21 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
             flags=0,
             max_order=4,
         )
-        t_structured = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (structured)':<30} {len(structured_raw):>8,} {len(structured_raw)/original:>8.3f}  ({t_structured:.2f}s)")
+        t_structured_raw = time.perf_counter() - t0
+        click.echo(f"  {'structured raw diagnostic':<30} {len(structured_raw):>8,} {len(structured_raw)/original:>8.3f}  ({t_structured_raw:.2f}s)")
         structured_header, structured_sections, _ = read_file_v3(structured_raw)
         structured_stats = StructuredOnlineStats.deserialize(_section_data(structured_sections, SECTION_STATS))
         click.echo(f"    side info={structured_stats.side_info_bytes:,} payload={structured_stats.payload_bytes:,} residual={structured_stats.residual_bytes:,}")
+        if structured_stats.typed_slot_count:
+            click.echo(f"    typed slots={structured_stats.typed_slot_count:,} typed templates={structured_stats.typed_template_count:,}")
         if structured_stats.route_counts:
             click.echo("    routes=" + ", ".join(f"{route}={count}" for route, count in structured_stats.route_counts))
+        if structured_stats.template_family_counts:
+            click.echo("    template families=" + ", ".join(f"{family}={count}" for family, count in structured_stats.template_family_counts))
         if len(structured_raw) > len(offline):
             click.echo(f"    fallback=offline by {len(structured_raw) - len(offline):,} bytes")
             if structured_stats.reason_counts:
                 click.echo("    loss reason=" + ", ".join(f"{reason}={count}" for reason, count in structured_stats.reason_counts))
-
-        t0 = time.perf_counter()
-        online_char = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="char")
-        t_char = time.perf_counter() - t0
-        click.echo(f"  {'zippedtext online (legacy char)':<30} {len(online_char):>8,} {len(online_char)/original:>8.3f}  ({t_char:.2f}s)")
 
         t0 = time.perf_counter()
         online_token = compress(text, mode="online", api_client=api_client, model_name=cfg.model, sub_mode="token")

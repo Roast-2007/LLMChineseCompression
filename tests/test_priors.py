@@ -33,6 +33,11 @@ class TestPriorsData:
         assert a is not b  # different dict objects
 
 
+    def test_has_exactly_3000_unique_chars(self):
+        assert len(CHINESE_CHAR_FREQS) == 3000
+        assert len(set(CHINESE_CHAR_FREQS)) == 3000
+
+
 class TestPredictorWithPriors:
     def test_warm_start_knows_common_chars(self):
         priors = get_chinese_priors()

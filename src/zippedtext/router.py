@@ -6,7 +6,14 @@ from .encoder import encode, encode_with_phrases
 from .gain_estimator import GainEstimate, GainEstimatorConfig, choose_best_route, estimate_total_bytes
 from .online_manifest import ROUTE_LITERAL, ROUTE_PHRASE, ROUTE_TEMPLATE
 from .segment import TextSegment
-from .template_codec import TemplateCatalog, detect_template, encode_template_segment, template_route_allowed
+from .template_codec import (
+    TemplateCatalog,
+    detect_template,
+    encode_template_segment,
+    template_confidence_threshold,
+    template_kind_is_hinted,
+    template_route_allowed,
+)
 
 PHRASE_ENABLED_KINDS = frozenset({"prose", "list", "table", "config", "mixed"})
 
@@ -60,10 +67,15 @@ def route_segments(
 
     phrase_amortized_cost = _amortize_cost(phrase_section_cost, len(segments))
     template_amortized_cost = _amortize_cost(template_section_cost, len(segments))
+    template_index_map = {
+        entry: index
+        for index, entry in enumerate(template_catalog.entries)
+    } if template_catalog else {}
 
     for segment in segments:
         segment_text = text[segment.start:segment.end]
         original_bytes = len(segment_text.encode("utf-8"))
+        literal_reason = ""
         literal_payload = encode(
             segment_text,
             priors=priors,
@@ -78,6 +90,7 @@ def route_segments(
                 side_info_bytes=0,
                 total_bytes=estimate_total_bytes(len(literal_payload), 0, config),
                 estimated_gain_bytes=max(original_bytes - len(literal_payload), 0),
+                fallback_reason=literal_reason,
             )
         ]
 
@@ -103,35 +116,55 @@ def route_segments(
 
         if template_catalog and template_route_allowed(segment.kind):
             match = detect_template(segment_text, analysis)
-            if match and match.confidence >= 0.75:
+            if match:
                 entry = (match.template_kind, match.skeleton)
-                if entry in template_catalog.entries:
-                    template_index = template_catalog.entries.index(entry)
-                    template_payload = encode_template_segment(
-                        segment_text,
-                        match,
-                        template_index,
-                        phrase_set,
-                        priors,
-                        max_order,
-                    )
-                    template_side_info = template_amortized_cost + config.route_switch_penalty_bytes
-                    template_total = estimate_total_bytes(
-                        template_payload.encoded_bytes,
-                        template_side_info,
-                        config,
-                    )
-                    candidates.append(
-                        GainEstimate(
-                            route=ROUTE_TEMPLATE,
-                            payload=template_payload.payload,
-                            payload_bytes=template_payload.encoded_bytes,
-                            side_info_bytes=template_side_info,
-                            total_bytes=template_total,
-                            estimated_gain_bytes=max(original_bytes - template_total, 0),
-                            residual_bytes=template_payload.residual_bytes,
+                template_index = template_index_map.get(entry)
+                if template_index is None:
+                    literal_reason = "template no catalog reuse"
+                else:
+                    threshold = template_confidence_threshold(match, analysis)
+                    if template_kind_is_hinted(match.template_kind, analysis):
+                        threshold = max(threshold - 0.03, 0.6)
+                    if match.confidence < threshold:
+                        literal_reason = "template below threshold"
+                    else:
+                        template_payload = encode_template_segment(
+                            segment_text,
+                            match,
+                            template_index,
+                            phrase_set,
+                            priors,
+                            max_order,
                         )
-                    )
+                        template_side_info = template_amortized_cost + config.route_switch_penalty_bytes
+                        template_total = estimate_total_bytes(
+                            template_payload.encoded_bytes,
+                            template_side_info,
+                            config,
+                        )
+                        candidates.append(
+                            GainEstimate(
+                                route=ROUTE_TEMPLATE,
+                                payload=template_payload.payload,
+                                payload_bytes=template_payload.encoded_bytes,
+                                side_info_bytes=template_side_info,
+                                total_bytes=template_total,
+                                estimated_gain_bytes=max(original_bytes - template_total, 0),
+                                residual_bytes=template_payload.residual_bytes,
+                            )
+                        )
+
+        if literal_reason:
+            candidates[0] = GainEstimate(
+                route=candidates[0].route,
+                payload=candidates[0].payload,
+                payload_bytes=candidates[0].payload_bytes,
+                side_info_bytes=candidates[0].side_info_bytes,
+                total_bytes=candidates[0].total_bytes,
+                estimated_gain_bytes=candidates[0].estimated_gain_bytes,
+                fallback_reason=literal_reason,
+                residual_bytes=candidates[0].residual_bytes,
+            )
 
         decision = choose_best_route(segment, original_bytes, tuple(candidates), config).chosen
         route_counts[decision.route] = route_counts.get(decision.route, 0) + 1

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 import struct
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 
 from .decoder import decode, decode_with_phrases
 from .online_manifest import AnalysisManifest, ROUTE_LITERAL, ROUTE_PHRASE, ROUTE_TEMPLATE
-from .predictor.phrases import PhraseTable
 from .residual import EncodedResidual, deserialize_string_tuple, encode_residual_segments, serialize_string_tuple
 
 _TEMPLATE_MAGIC = b"TPL1"
@@ -23,6 +24,8 @@ _TEMPLATE_KIND_TO_ID = {
 }
 _TEMPLATE_ID_TO_KIND = {value: key for key, value in _TEMPLATE_KIND_TO_ID.items()}
 _TEMPLATE_ENABLED_KINDS = frozenset({"prose", "list", "table", "config", "mixed"})
+_NUMBERED_LIST_RE = re.compile(r"^(\d+[.)]\s+)(.+)$")
+_SENTENCE_PUNCTUATION = frozenset("。！？!?；;")
 
 
 @dataclass(frozen=True)
@@ -102,8 +105,11 @@ def build_template_catalog(
     text: str,
     analysis: AnalysisManifest,
 ) -> TemplateCatalog:
-    entries: list[tuple[str, str]] = []
+    counts: Counter[tuple[str, str]] = Counter()
+    confidences: dict[tuple[str, str], float] = {}
+    ordered: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
+
     for segment in segments:
         if segment.kind not in _TEMPLATE_ENABLED_KINDS:
             continue
@@ -112,10 +118,17 @@ def build_template_catalog(
         if not match:
             continue
         entry = (match.template_kind, match.skeleton)
-        if entry in seen:
-            continue
-        seen.add(entry)
-        entries.append(entry)
+        counts[entry] += 1
+        confidences[entry] = max(confidences.get(entry, 0.0), match.confidence)
+        if entry not in seen:
+            seen.add(entry)
+            ordered.append(entry)
+
+    entries: list[tuple[str, str]] = []
+    for entry in ordered:
+        hinted = template_kind_is_hinted(entry[0], analysis)
+        if counts[entry] >= 2 or (hinted and confidences.get(entry, 0.0) >= 0.9):
+            entries.append(entry)
     return TemplateCatalog(entries=tuple(entries))
 
 
@@ -123,16 +136,39 @@ def detect_template(text: str, analysis: AnalysisManifest | None = None) -> Temp
     stripped = text.strip()
     if not stripped:
         return None
-    key_value = _match_key_value(stripped)
-    if key_value:
-        return key_value
-    list_prefix = _match_list_prefix(stripped)
-    if list_prefix:
-        return list_prefix
-    table_row = _match_table_row(stripped)
-    if table_row:
-        return table_row
-    return None
+
+    candidates = [
+        _match_key_value(stripped),
+        _match_list_prefix(stripped),
+        _match_table_row(stripped),
+    ]
+    adjusted = [
+        _apply_template_hint_score(candidate, stripped, analysis)
+        for candidate in candidates
+        if candidate is not None
+    ]
+    if not adjusted:
+        return None
+    return max(adjusted, key=_template_sort_key)
+
+
+def template_kind_is_hinted(template_kind: str, analysis: AnalysisManifest | None) -> bool:
+    return analysis is not None and template_kind in analysis.template_hints
+
+
+def template_confidence_threshold(
+    match: TemplateMatch,
+    analysis: AnalysisManifest | None,
+) -> float:
+    threshold = 0.75
+    if template_kind_is_hinted(match.template_kind, analysis):
+        threshold -= 0.08
+    elif analysis and analysis.template_hints:
+        threshold += 0.03
+    if match.template_kind == _TEMPLATE_KIND_KEY_VALUE and len(match.slot_values) >= 2:
+        if len(match.slot_values[1]) > 48:
+            threshold += 0.04
+    return min(max(threshold, 0.62), 0.9)
 
 
 def encode_template_segment(
@@ -250,19 +286,42 @@ def _render_template(
     residual_text: tuple[str, ...],
 ) -> str:
     if template_kind == _TEMPLATE_KIND_KEY_VALUE:
-        if len(slot_values) < 2:
+        if not slot_values:
             raise ValueError("invalid key-value template")
         suffix = residual_text[0] if residual_text else ""
-        return f"{slot_values[0]}{skeleton}{slot_values[1]}{suffix}"
+        return f"{skeleton}{slot_values[0]}{suffix}"
     if template_kind == _TEMPLATE_KIND_LIST_PREFIX:
         suffix = residual_text[0] if residual_text else ""
         value = slot_values[0] if slot_values else ""
         return f"{skeleton}{value}{suffix}"
     if template_kind == _TEMPLATE_KIND_TABLE_ROW:
         suffix = residual_text[0] if residual_text else ""
-        values = " | ".join(slot_values)
-        return f"| {values} |{suffix}"
+        return skeleton.format(*slot_values) + suffix
     raise ValueError("invalid template kind")
+
+
+def _apply_template_hint_score(
+    match: TemplateMatch,
+    text: str,
+    analysis: AnalysisManifest | None,
+) -> TemplateMatch:
+    confidence = match.confidence
+    if template_kind_is_hinted(match.template_kind, analysis):
+        confidence += 0.08
+    elif analysis and analysis.template_hints:
+        confidence -= 0.03
+    if match.template_kind == _TEMPLATE_KIND_KEY_VALUE and len(text) > 120:
+        confidence -= 0.08
+    return replace(match, confidence=min(max(confidence, 0.0), 0.99))
+
+
+def _template_sort_key(match: TemplateMatch) -> tuple[float, int, int]:
+    priority = {
+        _TEMPLATE_KIND_TABLE_ROW: 2,
+        _TEMPLATE_KIND_KEY_VALUE: 1,
+        _TEMPLATE_KIND_LIST_PREFIX: 0,
+    }.get(match.template_kind, 0)
+    return (match.confidence, priority, len(match.skeleton))
 
 
 def _match_key_value(text: str) -> TemplateMatch | None:
@@ -275,8 +334,13 @@ def _match_key_value(text: str) -> TemplateMatch | None:
         value = value.strip()
         if not key or not value:
             continue
-        if len(key) > 40 or len(value) < 2:
+        if len(key) > 48 or len(value) < 2:
             continue
+        if any(ch in _SENTENCE_PUNCTUATION for ch in key):
+            continue
+        if key.count(" ") > 6:
+            continue
+
         suffix = ""
         base_value = value
         if "（" in value and value.endswith("）"):
@@ -287,16 +351,29 @@ def _match_key_value(text: str) -> TemplateMatch | None:
             base_value, suffix = value.rsplit(" (", 1)
             suffix = " (" + suffix
             base_value = base_value.rstrip()
-        residual_spans = ()
+        if not base_value:
+            continue
+
+        confidence = 0.82
+        if len(key) <= 24:
+            confidence += 0.05
+        if separator in (": ", " = "):
+            confidence += 0.02
+        if len(base_value) > 64:
+            confidence -= 0.08
+        if sum(base_value.count(mark) for mark in "。！？!?") >= 2:
+            confidence -= 0.08
+
+        residual_spans: tuple[tuple[int, int], ...] = ()
         if suffix:
             start = text.rfind(suffix)
             residual_spans = ((start, len(text)),)
         return TemplateMatch(
             template_kind=_TEMPLATE_KIND_KEY_VALUE,
-            skeleton=separator,
-            slot_values=(key, base_value),
+            skeleton=f"{key}{separator}",
+            slot_values=(base_value,),
             residual_spans=residual_spans,
-            confidence=0.92,
+            confidence=confidence,
         )
     return None
 
@@ -304,42 +381,71 @@ def _match_key_value(text: str) -> TemplateMatch | None:
 def _match_list_prefix(text: str) -> TemplateMatch | None:
     prefixes = ("- ", "* ", "• ")
     for prefix in prefixes:
-        if text.startswith(prefix) and len(text) > len(prefix) + 3:
+        if text.startswith(prefix) and len(text) > len(prefix) + 2:
+            confidence = 0.8 if len(text) <= 80 else 0.74
             return TemplateMatch(
                 template_kind=_TEMPLATE_KIND_LIST_PREFIX,
                 skeleton=prefix,
                 slot_values=(text[len(prefix):],),
                 residual_spans=(),
-                confidence=0.8,
+                confidence=confidence,
             )
-    if len(text) > 4 and text[0].isdigit() and text[1:3] in (". ", ") "):
-        prefix = text[:3]
-        return TemplateMatch(
-            template_kind=_TEMPLATE_KIND_LIST_PREFIX,
-            skeleton=prefix,
-            slot_values=(text[3:],),
-            residual_spans=(),
-            confidence=0.78,
-        )
-    return None
+
+    numbered = _NUMBERED_LIST_RE.match(text)
+    if not numbered:
+        return None
+    prefix, value = numbered.groups()
+    confidence = 0.79 if len(value) <= 80 else 0.73
+    return TemplateMatch(
+        template_kind=_TEMPLATE_KIND_LIST_PREFIX,
+        skeleton=prefix,
+        slot_values=(value,),
+        residual_spans=(),
+        confidence=confidence,
+    )
 
 
 def _match_table_row(text: str) -> TemplateMatch | None:
-    if text.count("|") < 2:
-        return None
     stripped = text.strip()
-    if not stripped.startswith("|") or not stripped.endswith("|"):
+    if stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2:
+        raw_cells = stripped[1:-1].split("|")
+        slot_values = tuple(cell.strip() for cell in raw_cells)
+        if len(slot_values) >= 2 and all(value for value in slot_values):
+            skeleton_parts = ["|"]
+            for index, raw_cell in enumerate(raw_cells):
+                leading = raw_cell[:len(raw_cell) - len(raw_cell.lstrip())]
+                trailing = raw_cell[len(raw_cell.rstrip()):]
+                skeleton_parts.append(f"{_escape_braces(leading)}{{{index}}}{_escape_braces(trailing)}|")
+            return TemplateMatch(
+                template_kind=_TEMPLATE_KIND_TABLE_ROW,
+                skeleton="".join(skeleton_parts),
+                slot_values=slot_values,
+                residual_spans=(),
+                confidence=0.84,
+            )
+
+    if "\t" not in stripped:
         return None
-    parts = [item.strip() for item in stripped.strip("|").split("|")]
-    if len(parts) < 2 or any(not item for item in parts):
+    raw_cells = stripped.split("\t")
+    slot_values = tuple(cell.strip() for cell in raw_cells)
+    if len(slot_values) < 2 or any(not value for value in slot_values):
         return None
+    skeleton_parts: list[str] = []
+    for index, raw_cell in enumerate(raw_cells):
+        leading = raw_cell[:len(raw_cell) - len(raw_cell.lstrip())]
+        trailing = raw_cell[len(raw_cell.rstrip()):]
+        skeleton_parts.append(f"{_escape_braces(leading)}{{{index}}}{_escape_braces(trailing)}")
     return TemplateMatch(
         template_kind=_TEMPLATE_KIND_TABLE_ROW,
-        skeleton="|",
-        slot_values=tuple(parts),
+        skeleton="\t".join(skeleton_parts),
+        slot_values=slot_values,
         residual_spans=(),
-        confidence=0.82,
+        confidence=0.8,
     )
+
+
+def _escape_braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
 
 
 def template_route_allowed(segment_kind: str) -> bool:

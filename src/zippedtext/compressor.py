@@ -50,6 +50,7 @@ from .format import (
     write_file_v3,
 )
 from .online_manifest import (
+    AnalysisManifest,
     ROUTE_PHRASE,
     ROUTE_TEMPLATE,
     SegmentRecord,
@@ -77,6 +78,33 @@ def _get_priors() -> dict[str, float]:
         return get_chinese_priors()
     except ImportError:
         return {}
+
+
+def _merge_priors(
+    base_priors: dict[str, float] | None,
+    manifest_priors: dict[str, float] | None,
+    manifest_weight: float = 0.35,
+) -> dict[str, float] | None:
+    if not base_priors and not manifest_priors:
+        return None
+    if not manifest_priors:
+        return dict(base_priors) if base_priors else None
+    if not base_priors:
+        return dict(manifest_priors)
+
+    merged = {
+        ch: (base_priors.get(ch, 0.0) * (1.0 - manifest_weight))
+        + (manifest_priors.get(ch, 0.0) * manifest_weight)
+        for ch in set(base_priors) | set(manifest_priors)
+    }
+    total = sum(merged.values())
+    if total <= 0:
+        return dict(base_priors)
+    return {
+        ch: value / total
+        for ch, value in merged.items()
+        if value > 0
+    }
 
 
 def _offline_compress(
@@ -358,6 +386,8 @@ def _structured_online_compress(
     max_order: int,
 ) -> bytes:
     analysis = api_client.analyze_text(text)
+    stored_analysis = analysis.for_storage()
+    effective_priors = _merge_priors(priors or None, stored_analysis.to_prior_map())
     phrase_table = build_structured_phrase_table(text, analysis)
     phrase_set = frozenset(phrase_table.phrases)
     phrase_table_bytes = phrase_table.serialize() if phrase_table.phrases else b""
@@ -368,7 +398,7 @@ def _structured_online_compress(
         text=text,
         segments=segments,
         phrase_set=phrase_set,
-        priors=priors or None,
+        priors=effective_priors,
         max_order=max_order,
         template_catalog=template_catalog,
         analysis=analysis,
@@ -394,7 +424,6 @@ def _structured_online_compress(
                 estimated_gain_bytes=routed.estimated_gain_bytes,
             )
         )
-    stored_analysis = analysis.for_storage()
     analysis_bytes = stored_analysis.serialize()
     segment_bytes = serialize_segment_records(tuple(records))
 
@@ -454,6 +483,10 @@ def _structured_online_decompress(
     phrase_table = PhraseTable.deserialize(sections.get(SECTION_PHRASE_TABLE, make_section(b"")).data)
     phrase_set = frozenset(phrase_table.phrases)
     template_catalog = TemplateCatalog.deserialize(sections.get(SECTION_TEMPLATES, make_section(b"")).data)
+    analysis_section = sections.get(SECTION_ANALYSIS, make_section(b""))
+    total_chars = sum(record.char_count for record in deserialize_segment_records(sections.get(SECTION_SEGMENTS, make_section(b"")).data))
+    analysis = AnalysisManifest.deserialize(analysis_section.data, text_len=total_chars)
+    effective_priors = _merge_priors(priors, analysis.to_prior_map())
     records = deserialize_segment_records(sections.get(SECTION_SEGMENTS, make_section(b"")).data)
     pieces: list[str] = []
     offset = 0
@@ -468,7 +501,7 @@ def _structured_online_decompress(
                 record.char_count,
                 phrase_set,
                 None,
-                priors=priors,
+                priors=effective_priors,
                 max_order=max_order,
             )
         elif record.route == ROUTE_TEMPLATE:
@@ -477,7 +510,7 @@ def _structured_online_decompress(
                 template_catalog,
                 phrase_set,
                 record.char_count,
-                priors=priors,
+                priors=effective_priors,
                 max_order=max_order,
             )
         else:
@@ -485,7 +518,7 @@ def _structured_online_decompress(
                 payload,
                 record.char_count,
                 None,
-                priors=priors,
+                priors=effective_priors,
                 max_order=max_order,
             )
         pieces.append(text)

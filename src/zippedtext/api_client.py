@@ -165,14 +165,22 @@ class ApiClient:
   "template_hints": ["key_value", "list_prefix", "table_row"]
 }}
 
-要求：
-- char_frequencies 最多返回 64 项
-- top_bigrams 最多返回 32 项
-- phrase_dictionary 最多返回 32 项
-- language_segments 只保留高价值片段
-- template_hints 只返回高置信度命中
+你的目标不是泛泛总结文本，而是给压缩器提供“可复用、可离散化、可在解码期本地恢复”的高价值提示。
+请优先关注以下高结构模式：
+- API 文档中的参数说明行、字段说明行、返回值说明行
+- 配置 / 环境变量 / key-value 行
+- 列表项、编号项、枚举行
+- 表格行、TSV/制表符分隔行
+- 中英术语对照或名称:说明这类行级模式
 
-只返回JSON，不要任何解释。
+要求：
+- char_frequencies 最多返回 64 项，只保留真正高频且有压缩价值的字符
+- top_bigrams 最多返回 32 项，只返回文本中真实高频、可复用的字符对
+- phrase_dictionary 最多返回 32 项，优先返回文本中重复出现或明显可复用的术语/短语
+- language_segments 只保留高价值片段，位置尽量准确
+- template_hints 只返回高置信度命中，不要为了覆盖面乱猜
+- 如果文本主要是普通 prose，没有明显模板，就让 template_hints 为空数组
+- 只返回 JSON，不要任何解释
 
 文本内容：
 {text[:4000]}"""

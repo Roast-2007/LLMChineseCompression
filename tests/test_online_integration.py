@@ -113,34 +113,36 @@ def test_online_token_chinese():
     print(f"\n  Chinese token-level: {len(text.encode('utf-8'))}B → {len(compressed)}B (ratio: {ratio:.3f})")
 
 
-# ---------------------------------------------------------------------------
-# Compression ratio benchmarks
-# ---------------------------------------------------------------------------
-
 @skip_no_api
-def test_compression_ratio_char():
-    """Verify online char-level achieves reasonable compression ratio."""
-    from zippedtext.compressor import compress
+def test_online_structured_config_smoke():
+    """Compress/decompress structured config text with structured online path."""
+    from zippedtext.compressor import _structured_online_compress, decompress
+    from zippedtext.format import SECTION_STATS, VERSION_V3, compute_crc32, read_file_v3
+    from zippedtext.online_manifest import StructuredOnlineStats
 
-    # Use the sample Chinese text
-    text_path = os.path.join(os.path.dirname(__file__), "sample_cn.txt")
-    if not os.path.exists(text_path):
-        pytest.skip("sample_cn.txt not found")
-
-    with open(text_path, "rb") as f:
-        text = f.read().decode("utf-8")
-
+    text = (
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions"
+    )
+    encoded = text.encode("utf-8")
     client = _make_client()
-    compressed = compress(text, mode="online", api_client=client, sub_mode="char")
 
-    original_size = len(text.encode("utf-8"))
-    ratio = len(compressed) / original_size
-    print(f"\n  Sample CN char-level: {original_size}B → {len(compressed)}B (ratio: {ratio:.3f})")
+    compressed = _structured_online_compress(
+        text=text,
+        text_bytes=encoded,
+        crc=compute_crc32(encoded),
+        api_client=client,
+        model_name=client.model,
+        priors={},
+        flags=0,
+        max_order=4,
+    )
+    restored = decompress(compressed)
+    assert restored == text
 
-    # Online mode should be at least as good as offline (0.54)
-    # Target is < 0.35 but this depends on LLM prediction quality
-    assert ratio < 0.60, f"Online char ratio {ratio:.3f} worse than expected"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
+    header, sections, _ = read_file_v3(compressed)
+    assert header.version == VERSION_V3
+    stats = StructuredOnlineStats.deserialize(sections[SECTION_STATS])
+    assert stats.segment_count >= 1

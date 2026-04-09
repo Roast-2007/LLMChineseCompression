@@ -4,11 +4,13 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 LLM API 后可进一步提升。
 
-**v0.3.2 新增**：引入 **structured online** 主路径、`.ztxt` v3 section 化格式、segment router、LLM 辅助术语/短语字典、API-free structured 解压、legacy online 冻结与兼容保留。
+**v0.3.3 新增**：structured online 第二阶段优化：analysis priors 真正接入 structured coder、list/table/config 行级切分、hint-aware template detection、phrase 排序增强、更细 fallback reason 与 structured API smoke test。
 
 **v0.3.1 新增**：在线模式性能优化（压缩速度 13× 提升、解压缩速度 1200× 提升）、预测缓存嵌入（解压无需 API）、智能回退（自动选择最优模式）。
 
 **v0.3.0 新增**：中文字符频率先验、短语级编码、代码生成模式（实验性）、多平台 API 支持（SiliconFlow 硅基流动等）、交互式配置系统。
+
+> v0.3.3 继续沿着 structured online 主线推进：重点不再是继续压 side info，而是提升 template / phrase 命中率、让 stored analysis 真正参与编码收益，并提高 API 文档、配置行、列表、表格这类结构化文本上的 route 收益。
 
 ## 当前 online 模式说明
 
@@ -17,6 +19,9 @@ LLM 增强的无损中英文纯文本压缩工具。
 1. **structured online（默认）**
    - 压缩期调用 LLM 做结构分析；
    - 让 LLM 参与短语/术语提示、语言片段提示、segment routing；
+   - analysis 中的字符先验会与本地 priors 合并后参与 structured literal / phrase / template residual coder；
+   - `list` / `table` / `config` 块会优先按行切分，提高 template route 命中机会；
+   - template detection 会结合 `template_hints`、catalog reuse 与 gain 共同决策；
    - 结果写入 `.ztxt` v3 的结构化 side info section；
    - **解压不依赖 API**。
 
@@ -24,8 +29,6 @@ LLM 增强的无损中英文纯文本压缩工具。
    - `--sub-mode char`
    - `--sub-mode token`
    - 保留旧版 next-token / char boost + prediction cache 路径，用于对比和兼容旧思路。
-
-一句话：
 
 > v0.3.2 开始，online mode 不再只是“让 LLM 续写然后给 PPM 打补丁”，而是让 LLM 开始参与分段、字典构建、结构化 side info 设计与压缩模式选择。
 
@@ -37,7 +40,10 @@ LLM 增强的无损中英文纯文本压缩工具。
 4. **structured online（当前主路径）**：
    - LLM 一次性分析全文；
    - 生成字符频率、短语/术语候选、语言片段提示、template hints；
-   - 本地分段，并用 gain estimator 在 literal / phrase / template 之间做净收益选路；
+   - 本地分段；对 `list` / `table` / `config` 优先做行级切分；
+   - analysis 中的字符先验会与本地 priors 融合，进入 structured literal / phrase / template residual 编解码；
+   - phrase table 会综合 heuristic phrases、LLM phrase hints、top bigrams 与 char frequencies 做排序；
+   - 本地用 gain estimator 在 literal / phrase / template 之间做净收益选路，并记录更细的 fallback reason；
    - template route 采用 `template_id + slot values + residual`，residual 继续复用现有 literal / phrase coder；
    - analysis / dictionary / templates / segment metadata / stats 写入 `.ztxt` v3 typed sections；
    - 解压时不访问远端 API，只依赖文件内 side info 和确定性本地 coder。
@@ -309,13 +315,22 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] ~~引入 `.ztxt` v3 section 化格式~~ (v0.3.2)
 - [x] ~~segment router~~ (v0.3.2)
 - [x] ~~LLM 辅助 term/phrase dictionary~~ (v0.3.2)
-- [ ] template codec
-- [ ] residual architecture
-- [ ] mixture-of-experts probability layer
+- [x] ~~template codec~~ (v0.3.3)
+- [x] ~~residual architecture~~ (v0.3.3)
+- [ ] structured online 第二阶段优化（hint-aware template hit、line-level routing、analysis priors 利用）
 - [ ] 本地确定性模型
 - [ ] Rust 核心加速（PyO3）
 
-## 更新日志
+### v0.3.3 — structured online 命中率与路由收益优化
+
+- analysis manifest 中的字符频率现在会真正并入 structured literal / phrase / template residual 编解码 priors
+- `segment.py` 现在会优先把 `list` / `table` / `config` 按行切分，提升 template route 命中机会
+- `template_codec.py` 现在支持 hint-aware scoring、多位数字列表前缀、TSV 表格行，并抑制明显的 key-value 误判
+- `build_template_catalog()` 现在会过滤明显 one-off 的模板，减少无效 template side info
+- `term_dictionary.py` 现在会结合 `phrase_dictionary`、`top_bigrams`、`char_frequencies` 改善 structured phrase 排序
+- `router.py` / `gain_estimator.py` 现在会保留更细的 fallback reason（如 `template no catalog reuse`）
+- 新增 structured online API smoke test，并保留 whole-file 自动 fallback offline 的现有行为
+
 
 ### v0.3.2 — structured online 初步落地
 

@@ -13,7 +13,42 @@ def test_detect_template_for_key_value_line():
     match = detect_template("name: zippedtext")
     assert match is not None
     assert match.template_kind == "key_value"
-    assert match.slot_values == ("name", "zippedtext")
+    assert match.skeleton == "name: "
+    assert match.slot_values == ("zippedtext",)
+
+
+def test_detect_template_supports_multi_digit_numbered_list():
+    match = detect_template("12. 安装 zippedtext")
+    assert match is not None
+    assert match.template_kind == "list_prefix"
+    assert match.skeleton == "12. "
+
+
+def test_detect_template_supports_tsv_rows():
+    match = detect_template("name\tvalue\tdescription")
+    assert match is not None
+    assert match.template_kind == "table_row"
+    assert match.slot_values == ("name", "value", "description")
+
+
+def test_detect_template_uses_template_hints_to_boost_confidence():
+    text = "name: zippedtext"
+    plain = detect_template(text)
+    hinted = detect_template(
+        text,
+        AnalysisManifest.from_api_payload({"template_hints": ["key_value"]}, len(text)),
+    )
+    assert plain is not None
+    assert hinted is not None
+    assert hinted.confidence > plain.confidence
+
+
+def test_build_template_catalog_prunes_one_off_entries_without_hints():
+    text = "name: zippedtext\nversion: 0.3.3\n\n只出现一次的段落"
+    analysis = AnalysisManifest()
+    segments = split_text_segments(text, analysis, max_chars=200)
+    catalog = build_template_catalog(segments, text, analysis)
+    assert catalog.entries == ()
 
 
 def test_template_segment_roundtrip():

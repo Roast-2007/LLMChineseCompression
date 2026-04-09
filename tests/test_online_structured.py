@@ -5,6 +5,7 @@ from zippedtext.format import (
     SECTION_PHRASE_TABLE,
     SECTION_SEGMENTS,
     SECTION_STATS,
+    SECTION_TEMPLATES,
     VERSION_V3,
     compute_crc32,
     read_file,
@@ -24,8 +25,10 @@ class FakeStructuredApiClient:
         return AnalysisManifest.from_api_payload(
             {
                 "char_frequencies": {"压": 0.2, "缩": 0.18, "模": 0.16, "式": 0.14},
+                "top_bigrams": [["配置", 0.8], ["模式", 0.6]],
                 "phrase_dictionary": ["压缩算法", "在线模式", "structured online"],
                 "language_segments": [{"start": 0, "end": len(text), "lang": "zh"}],
+                "template_hints": ["key_value"],
             },
             len(text),
         )
@@ -84,3 +87,31 @@ def test_structured_online_v3_sections_present():
     stats = StructuredOnlineStats.deserialize(sections[SECTION_STATS])
     assert stats.segment_count >= 1
     assert stats.analysis_bytes > 0
+
+
+def test_structured_online_uses_template_section_for_repeated_config_lines():
+    text = (
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions\n"
+        "endpoint: https://api.deepseek.com/v1/chat/completions"
+    )
+    encoded = text.encode("utf-8")
+    client = FakeStructuredApiClient()
+    data = _structured_online_compress(
+        text=text,
+        text_bytes=encoded,
+        crc=compute_crc32(encoded),
+        api_client=client,
+        model_name=client.model,
+        priors={"n": 0.2},
+        flags=0,
+        max_order=4,
+    )
+
+    _, sections, _ = read_file_v3(data)
+    assert SECTION_TEMPLATES in sections
+    stats = StructuredOnlineStats.deserialize(sections[SECTION_STATS])
+    assert stats.template_count >= 1
+    assert stats.template_hit_count >= 1
+    assert decompress(data) == text

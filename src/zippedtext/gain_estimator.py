@@ -43,6 +43,7 @@ def choose_best_route(
     literal = next((item for item in ordered if item.route == "literal"), ordered[0])
     best = ordered[0]
     if best.route != literal.route and literal.total_bytes - best.total_bytes < config.min_gain_bytes:
+        fallback_reason = literal.fallback_reason or "side-info cost too high"
         best = GainEstimate(
             route=literal.route,
             payload=literal.payload,
@@ -50,7 +51,7 @@ def choose_best_route(
             side_info_bytes=literal.side_info_bytes,
             total_bytes=literal.total_bytes,
             estimated_gain_bytes=max(original_bytes - literal.total_bytes, 0),
-            fallback_reason="side-info cost too high",
+            fallback_reason=fallback_reason,
             residual_bytes=literal.residual_bytes,
         )
     elif best.route == "literal" and best.fallback_reason == "":

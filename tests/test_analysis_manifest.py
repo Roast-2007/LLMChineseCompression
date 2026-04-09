@@ -1,7 +1,6 @@
 import json
 
-import pytest
-
+from zippedtext.compressor import _merge_priors
 from zippedtext.online_manifest import (
     AnalysisManifest,
     StructuredOnlineStats,
@@ -43,6 +42,13 @@ def test_analysis_manifest_roundtrip_and_prior_map():
     restored = AnalysisManifest.deserialize(manifest.serialize(), text_len=4)
     assert restored == manifest
     assert manifest.to_prior_map() == {"你": 0.75, "好": 0.25}
+
+
+def test_merge_priors_blends_base_and_manifest_priors():
+    merged = _merge_priors({"你": 0.5, "好": 0.5}, {"你": 1.0}, manifest_weight=0.4)
+    assert merged is not None
+    assert merged["你"] > merged["好"]
+    assert abs(sum(merged.values()) - 1.0) < 1e-9
 
 
 def test_segment_records_roundtrip():

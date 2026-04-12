@@ -2,7 +2,7 @@
 
 LLM 增强的无损中英文纯文本压缩工具。
 
-基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 LLM API 后可进一步提升。
+基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；预期在v0.5.0前后接入 LLM API 可进一步提升压缩率，当前仍在探索合适的llm深度嵌入方式。
 
 **v0.3.5 新增**：代码质量与健壮性加固——`_merge_priors` 浮点精度过滤修复、`_match_key_value` 嵌套括号安全处理、structured 路径前轻量启发式预检（小文本跳过 API 调用）、`probs_to_cdf` redistribution 极端情况兜底、`_looks_like_config` 行级模式检测修复、`router.py` 消除 `detect_template` 重复调用、`_count_all_phrase_occurrences` 单次全文扫描优化、内部函数重命名为公共 API（`get_priors` / `structured_compress`）。
 

@@ -90,7 +90,7 @@ class Header:
     flags: int = 0
     max_order: int = DEFAULT_MAX_ORDER
     phrase_table_len: int = 0
-    version: int = VERSION_V2
+    version: int = VERSION  # current write version (v3)
 
 
 @dataclass(frozen=True)

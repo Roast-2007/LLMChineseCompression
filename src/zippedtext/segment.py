@@ -161,12 +161,18 @@ def _looks_like_code(text: str) -> bool:
 
 
 def _looks_like_config(text: str) -> bool:
-    return (
-        text.startswith("{")
-        or text.startswith("[")
-        or text.count(":") >= 3
-        or text.count("=") >= 3
-    )
+    if text.startswith("{") or text.startswith("["):
+        return True
+    lines = text.splitlines()
+    config_like_lines = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        # key = value or key: value patterns typical of config files
+        if re.match(r'^[A-Za-z_.\-/]+\s*[=:]\s*\S', stripped):
+            config_like_lines += 1
+    return config_like_lines >= 2 or text.count(":") >= 3 and text.count("=") >= 1 or text.count("=") >= 3
 
 
 def _digit_ratio(text: str) -> float:

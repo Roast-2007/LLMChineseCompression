@@ -197,6 +197,7 @@ pip install -e ".[dev]"
 5. **短语表同步**：encoder / decoder 必须以相同顺序添加短语到 predictor
 6. **structured online 解压不访问 API**：新的 v3 online 文件必须只依赖本地 side info 完成解压
 7. **whole-file fallback 仍然有效**：`compress()` 在 structured 结果不划算时仍可自动回退 offline
+8. **priors 合并安全**：`_merge_priors()` 合并字符先验时不得因浮点精度静默移除字符（阈值 `> 1e-15`）
 
 ---
 
@@ -264,6 +265,19 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] `bench` headline 结果改为走 public structured path，并保留 raw structured diagnostic
 - [x] CLI 测试 + 结构化 fixture
 
+### v0.3.5 — code quality + robustness hardening ✅
+
+- [x] `_merge_priors()` 浮点精度过滤修复（阈值改为 `> 1e-15`，避免静默移除字符）
+- [x] `_match_key_value()` 嵌套括号歧义处理（拒绝嵌套括号 value 的 suffix 提取）
+- [x] structured 路径前轻量启发式预检（`_should_skip_structured_api`，小文本/低结构化度文本跳过 API）
+- [x] `probs_to_cdf()` redistribution 极端情况兜底（diff 残留强制平衡）
+- [x] `_looks_like_config()` 误判修复（改为行级 `key=value` 模式检测）
+- [x] `detect_template()` 重复调用优化（router.py 预扫描缓存，避免每段调用两次）
+- [x] `_count_phrase_occurrences()` 单次全文扫描优化（`_count_all_phrase_occurrences`）
+- [x] `_get_priors` / `_structured_online_compress` 重命名为公共 API（`get_priors` / `structured_compress`）
+- [x] `Header.version` 默认值与 `VERSION` 常量同步（v3）
+- [x] `compressor.py` 新增 `import re`（支持结构化预检）
+
 ### 后续仍未完成
 
 - [ ] multi-line / record template family
@@ -315,3 +329,21 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 ### Q: structured online 解压为什么仍然不需要 API？
 
 因为 LLM 只参与编码期建模；解压期只依赖 `.ztxt` v3 中的 side info 与本地确定性 coder。
+
+---
+
+## 9. 代码审查记录（v0.3.5 修复）
+
+### 2026-04-12 全项目代码审查修复
+
+| 编号 | 严重度 | 模块 | 问题 | 修复 |
+|------|--------|------|------|------|
+| S1 | 严重 | `compressor.py` | `_merge_priors` 的 `value > 0` 过滤可能因浮点精度静默移除字符 | 改为 `> 1e-15` 阈值 |
+| S2 | 严重 | `template_codec.py` | `_match_key_value` 的 `rsplit("（", 1)` 对嵌套括号会误切分 | 增加嵌套检测，拒绝嵌套括号的 suffix 提取 |
+| S3 | 严重 | `compressor.py` | 小文本/低结构化文本仍调用 LLM API 产生不必要费用 | 新增 `_should_skip_structured_api()` 轻量启发式预检 |
+| M1 | 中等 | `arithmetic.py` | `probs_to_cdf()` redistribution 极端情况下 diff 可能残留 | 增加 diff 兜底和最终强制平衡逻辑 |
+| M3 | 中等 | `segment.py` | `_looks_like_config` 用 `text.count(":") >= 3` 误判 prose | 改为行级 `key=value` 模式正则检测 |
+| M6 | 中等 | `compressor.py` | `_get_priors` / `_structured_online_compress` 被 cli.py 直接导入，破坏封装 | 重命名为 `get_priors` / `structured_compress` |
+| L1 | 轻微 | `format.py` | `Header.version` 默认值 `VERSION_V2` 与 `VERSION = VERSION_V3` 不同步 | 改为 `version: int = VERSION` |
+| L2 | 轻微 | `router.py` | `detect_template()` 对每个 segment 调用两次 | 预扫描缓存，主循环复用 |
+| L3 | 轻微 | `term_dictionary.py` | `_count_phrase_occurrences` 对每个短语独立扫描全文 O(n*m*k) | 新增 `_count_all_phrase_occurrences` 单次扫描 |

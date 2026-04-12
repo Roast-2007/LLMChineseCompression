@@ -14,6 +14,7 @@ Online mode now has two families:
 
 from __future__ import annotations
 
+import re
 import struct
 
 from .decoder import (
@@ -71,7 +72,7 @@ SUB_MODE_CHAR = 0x00
 SUB_MODE_TOKEN = 0x01
 
 
-def _get_priors() -> dict[str, float]:
+def get_priors() -> dict[str, float]:
     """Load Chinese character frequency priors if available."""
     try:
         from .predictor.priors import get_chinese_priors
@@ -103,7 +104,7 @@ def _merge_priors(
     return {
         ch: value / total
         for ch, value in merged.items()
-        if value > 0
+        if value > 1e-15  # avoid silently dropping chars due to float precision
     }
 
 
@@ -141,6 +142,30 @@ def _offline_compress(
     return write_file(header, b"", compressed_body)
 
 
+def _should_skip_structured_api(text: str) -> bool:
+    """Lightweight heuristic to decide whether structured analysis is worth the API call.
+
+    Returns True when the text is too small or clearly unstructured, so we skip
+    the expensive LLM call and fall through to offline compression.
+    """
+    if len(text) < 300:
+        return True
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return True
+    structured_ratio = sum(
+        1 for line in lines
+        if any(line.lstrip().startswith(p) for p in ("- ", "* ", "• ", "|"))
+        or re.match(r"\d+[.)]\s+", line.lstrip())
+        or (":" in line and line.count(":") >= 1 and "：" not in line[:line.index(":")])
+        or "\t" in line
+    ) / len(lines)
+    # If less than 15% of lines look structured and text is under 2KB, skip
+    if structured_ratio < 0.15 and len(text) < 2000:
+        return True
+    return False
+
+
 def compress(
     text: str,
     mode: str = "offline",
@@ -159,7 +184,7 @@ def compress(
     text_bytes = text.encode("utf-8")
     crc = compute_crc32(text_bytes)
 
-    priors = _get_priors() if use_priors else {}
+    priors = get_priors() if use_priors else {}
     flags = FLAG_HAS_PRIORS if priors else 0
 
     phrase_table_bytes = b""
@@ -219,7 +244,9 @@ def compress(
         return write_file(header, model_data, compressed_body)
 
     if mode == "online" and api_client is not None and sub_mode == "structured":
-        structured_result = _structured_online_compress(
+        if _should_skip_structured_api(text):
+            return offline_result
+        structured_result = structured_compress(
             text=text,
             text_bytes=text_bytes,
             crc=crc,
@@ -314,7 +341,7 @@ def decompress(
 
     priors: dict[str, float] | None = None
     if header.flags & FLAG_HAS_PRIORS:
-        priors = _get_priors() or None
+        priors = get_priors() or None
 
     dec_kwargs: dict = {"priors": priors, "max_order": header.max_order}
 
@@ -375,7 +402,7 @@ def decompress(
     return text
 
 
-def _structured_online_compress(
+def structured_compress(
     text: str,
     text_bytes: bytes,
     crc: int,

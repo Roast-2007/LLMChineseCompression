@@ -51,6 +51,14 @@ def probs_to_cdf(probs: Sequence[float], vocab_size: int) -> list[int]:
             diff -= adj
             if diff == 0:
                 break
+        # Final safety: if diff > 0 (extreme edge case), force-adjust
+        if diff > 0:
+            freqs[max_idx] = max(1, freqs[max_idx] - diff)
+            diff = 0
+        # If still not balanced (shouldn't happen), force set max to close gap
+        remaining = TOTAL - sum(freqs)
+        if remaining != 0:
+            freqs[max_idx] += remaining
 
     # Build cumulative distribution
     cdf = [0] * (vocab_size + 1)

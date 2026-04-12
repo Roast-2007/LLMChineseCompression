@@ -116,7 +116,7 @@ def test_online_token_chinese():
 @skip_no_api
 def test_online_structured_url_smoke():
     """Compress/decompress URL-heavy structured text with structured online path."""
-    from zippedtext.compressor import _structured_online_compress, decompress
+    from zippedtext.compressor import structured_compress, decompress
     from zippedtext.format import SECTION_STATS, compute_crc32, read_file_v3
     from zippedtext.online_manifest import StructuredOnlineStats
 
@@ -129,7 +129,7 @@ def test_online_structured_url_smoke():
     encoded = text.encode("utf-8")
     client = _make_client()
 
-    compressed = _structured_online_compress(
+    compressed = structured_compress(
         text=text,
         text_bytes=encoded,
         crc=compute_crc32(encoded),

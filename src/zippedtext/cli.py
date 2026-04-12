@@ -10,8 +10,8 @@ import click
 from . import __version__
 from .compressor import (
     SUB_MODE_TOKEN,
-    _get_priors,
-    _structured_online_compress,
+    get_priors,
+    structured_compress,
     _unpack_online_model_data,
     compress,
     decompress,
@@ -348,13 +348,13 @@ def bench(input_file: str, api_key: str | None, base_url: str | None, model: str
             click.echo(f"    fallback=offline by {len(structured_final) - len(offline):,} bytes")
 
         t0 = time.perf_counter()
-        structured_raw = _structured_online_compress(
+        structured_raw = structured_compress(
             text=text,
             text_bytes=text_bytes,
             crc=compute_crc32(text_bytes),
             api_client=api_client,
             model_name=cfg.model,
-            priors=_get_priors(),
+            priors=get_priors(),
             flags=0,
             max_order=4,
         )

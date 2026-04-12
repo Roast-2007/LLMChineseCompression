@@ -1,4 +1,4 @@
-from zippedtext.compressor import _structured_online_compress, compress, decompress
+from zippedtext.compressor import structured_compress, compress, decompress
 from zippedtext.format import (
     MODE_ONLINE,
     MODE_OFFLINE,
@@ -53,7 +53,7 @@ def test_structured_online_roundtrip_without_api_on_decompress():
     )
     encoded = text.encode("utf-8")
     client = FakeStructuredApiClient()
-    data = _structured_online_compress(
+    data = structured_compress(
         text=text,
         text_bytes=encoded,
         crc=compute_crc32(encoded),
@@ -77,7 +77,7 @@ def test_structured_online_v3_sections_present():
     text = "压缩算法在线模式压缩算法在线模式。" * 4
     encoded = text.encode("utf-8")
     client = FakeStructuredApiClient()
-    data = _structured_online_compress(
+    data = structured_compress(
         text=text,
         text_bytes=encoded,
         crc=compute_crc32(encoded),
@@ -111,7 +111,7 @@ def test_structured_online_uses_template_section_for_repeated_config_lines():
     )
     encoded = text.encode("utf-8")
     client = FakeStructuredApiClient()
-    data = _structured_online_compress(
+    data = structured_compress(
         text=text,
         text_bytes=encoded,
         crc=compute_crc32(encoded),

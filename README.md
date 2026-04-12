@@ -4,11 +4,13 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；接入 LLM API 后可进一步提升。
 
+**v0.3.5 新增**：代码质量与健壮性加固——`_merge_priors` 浮点精度过滤修复、`_match_key_value` 嵌套括号安全处理、structured 路径前轻量启发式预检（小文本跳过 API 调用）、`probs_to_cdf` redistribution 极端情况兜底、`_looks_like_config` 行级模式检测修复、`router.py` 消除 `detect_template` 重复调用、`_count_all_phrase_occurrences` 单次全文扫描优化、内部函数重命名为公共 API（`get_priors` / `structured_compress`）。
+
 **v0.3.4 新增**：structured online 第三阶段聚焦 schema-seeded typed slot codec：analysis manifest 新增 `document_family` / `block_families` / `field_schemas` / `slot_hints` / `enum_candidates`，template slot 开始支持 `identifier` / `version` / `path_or_url` / `enum` / `number_with_unit`，`info` / `bench` 新增 typed slot 与 template family 可观测性，`bench` 现在同时展示 public structured 结果和 raw structured diagnostic。
 
 **v0.3.3 新增**：structured online 第二阶段优化：analysis priors 真正接入 structured coder、list/table/config 行级切分、hint-aware template detection、phrase 排序增强、更细 fallback reason 与 structured API smoke test。
 
-> v0.3.4 继续沿着 structured online 主线推进：重点不再是压更多 side info，而是让 LLM 提供更接近 schema 的结构提示，并把 template slot 从普通字符串升级为 typed slot，让 API 文档、配置行、版本号、URL/path、枚举值这类结构化文本获得更直接的压缩收益。
+> v0.3.5 在 structured online 主路径功能完整的基础上，聚焦代码健壮性和性能优化：修复了 priors 合并、模板解析、CDF 归一化等边界条件问题，消除了重复 API 调用和 O(n*m*k) 扫描开销，同时将小文本/低结构化文本的 API 调用智能跳过，避免不必要的费用支出。
 
 ## 当前 online 模式说明
 
@@ -323,10 +325,24 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] ~~residual architecture~~ (v0.3.3)
 - [x] ~~schema-seeded typed slot codec~~ (v0.3.4)
 - [x] ~~bench / info / CLI 可观测性补强~~ (v0.3.4)
+- [x] ~~code quality + robustness hardening~~ (v0.3.5)
 - [ ] multi-line / record template family
 - [ ] document-level family clustering + global gain optimization
 - [ ] 本地确定性模型
 - [ ] Rust 核心加速（PyO3）
+
+### v0.3.5 — code quality + robustness hardening
+
+- `_merge_priors()` 浮点精度阈值修复（`> 1e-15` 替代 `> 0`，避免静默移除字符）
+- `_match_key_value()` 嵌套括号安全处理（拒绝嵌套括号的 suffix 提取）
+- structured 路径前 `_should_skip_structured_api()` 轻量启发式预检（小文本/低结构化文本跳过 API）
+- `probs_to_cdf()` redistribution 极端情况兜底（diff 残留强制平衡）
+- `_looks_like_config()` 行级模式检测修复（避免误判包含多个中文冒号的 prose）
+- `router.py` `detect_template()` 预扫描缓存（消除每段调用两次的冗余）
+- `_count_all_phrase_occurrences()` 单次全文扫描优化（替代 O(n*m*k) 独立扫描）
+- 内部函数 `_get_priors` / `_structured_online_compress` 重命名为公共 API
+- `Header.version` 默认值与 `VERSION` 常量同步
+- 137 个测试全部通过
 
 ### v0.3.4 — schema-seeded typed slot structured online
 

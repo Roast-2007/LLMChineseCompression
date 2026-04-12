@@ -9,6 +9,7 @@ from .online_manifest import ROUTE_LITERAL, ROUTE_PHRASE, ROUTE_TEMPLATE
 from .segment import TextSegment
 from .template_codec import (
     TemplateCatalog,
+    TemplateMatch,
     detect_template,
     encode_template_segment,
     template_confidence_threshold,
@@ -79,14 +80,21 @@ def route_segments(
         entry: index
         for index, entry in enumerate(template_catalog.entries)
     } if template_catalog else {}
-    family_counts = Counter(
-        f"{match.template_kind}:{match.skeleton}"
-        for segment in segments
-        for match in [detect_template(text[segment.start:segment.end], analysis)]
-        if match is not None and (match.template_kind, match.skeleton) in template_index_map
-    )
+    # Pre-scan: detect templates once and cache results for both family counting and main loop
+    template_cache: dict[int, TemplateMatch | None] = {}
+    for idx, segment in enumerate(segments):
+        if template_catalog and template_route_allowed(segment.kind):
+            segment_text = text[segment.start:segment.end]
+            match = detect_template(segment_text, analysis)
+            if match is not None:
+                entry = (match.template_kind, match.skeleton)
+                if entry in template_index_map:
+                    template_family_counter[f"{match.template_kind}:{match.skeleton}"] += 1
+            template_cache[idx] = match
+        else:
+            template_cache[idx] = None
 
-    for segment in segments:
+    for seg_idx, segment in enumerate(segments):
         segment_text = text[segment.start:segment.end]
         original_bytes = len(segment_text.encode("utf-8"))
         literal_reason = ""
@@ -130,7 +138,7 @@ def route_segments(
 
         chosen_match = None
         if template_catalog and template_route_allowed(segment.kind):
-            match = detect_template(segment_text, analysis)
+            match = template_cache.get(seg_idx)
             if match:
                 entry = (match.template_kind, match.skeleton)
                 template_index = template_index_map.get(entry)
@@ -154,7 +162,7 @@ def route_segments(
                         family_key = f"{match.template_kind}:{match.skeleton}"
                         template_side_info = _family_amortized_cost(
                             template_section_cost,
-                            family_counts.get(family_key, 1),
+                            template_family_counter.get(family_key, 1),
                         ) + config.route_switch_penalty_bytes
                         template_total = estimate_total_bytes(
                             template_payload.encoded_bytes,

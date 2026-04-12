@@ -19,9 +19,14 @@ def build_structured_phrase_table(
     )
     counter: Counter[str] = Counter(heuristic.phrases)
 
+    # Single-pass occurrence counting for all candidate phrases
+    candidate_phrases = set(analysis.phrase_dictionary) | set(heuristic.phrases)
+    candidate_phrases = {p for p in candidate_phrases if len(p) >= 2}
+    occurrence_counts = _count_all_phrase_occurrences(text, candidate_phrases)
+
     for phrase in analysis.phrase_dictionary:
-        if phrase in text and len(phrase) >= 2:
-            counter[phrase] += _count_phrase_occurrences(text, phrase) + 2
+        if phrase in occurrence_counts and occurrence_counts[phrase] > 0:
+            counter[phrase] += occurrence_counts[phrase] + 2
 
     bigram_weights = dict(analysis.top_bigrams)
     char_weights = dict(analysis.char_frequencies)
@@ -29,7 +34,7 @@ def build_structured_phrase_table(
     for phrase, freq in counter.items():
         if freq < min_freq:
             continue
-        occurrence_count = _count_phrase_occurrences(text, phrase)
+        occurrence_count = occurrence_counts.get(phrase, 0)
         if occurrence_count <= 0:
             continue
         score = float(freq * max(len(phrase) - 1, 1))
@@ -51,7 +56,30 @@ def build_structured_phrase_table(
     return PhraseTable(phrases=tuple(selected))
 
 
+def _count_all_phrase_occurrences(
+    text: str,
+    phrases: set[str],
+) -> dict[str, int]:
+    """Count occurrences of all phrases in a single pass over the text.
+
+    Uses a sliding window approach: for each position, check if any phrase
+    starts here. This avoids O(n * m * k) repeated full-text scans.
+    """
+    counts: dict[str, int] = {p: 0 for p in phrases}
+    if not phrases:
+        return counts
+    max_len = max(len(p) for p in phrases)
+    phrase_set = frozenset(phrases)
+    for start in range(len(text)):
+        for length in range(2, min(max_len + 1, len(text) - start + 1)):
+            candidate = text[start:start + length]
+            if candidate in phrase_set:
+                counts[candidate] += 1
+    return counts
+
+
 def _count_phrase_occurrences(text: str, phrase: str) -> int:
+    """Legacy single-phrase counter (kept for backward compat)."""
     count = 0
     start = 0
     while True:

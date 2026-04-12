@@ -44,3 +44,4 @@ uv.lock
 # Docs build artifacts
 docs/_build/
 docs/.doctrees/
+roadmap.md

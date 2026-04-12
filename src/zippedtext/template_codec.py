@@ -428,14 +428,20 @@ def _match_key_value(text: str) -> TemplateMatch | None:
 
         suffix = ""
         base_value = value
+        # Reject nested parentheses to avoid ambiguous split
         if "（" in value and value.endswith("）"):
-            base_value, suffix = value.rsplit("（", 1)
-            suffix = "（" + suffix
-            base_value = base_value.rstrip()
+            inner = value[len(value.index("（")) + 1:-1]
+            if "（" not in inner and "）" not in inner:
+                base_value, suffix = value.rsplit("（", 1)
+                suffix = "（" + suffix
+                base_value = base_value.rstrip()
+            # else: leave value as-is, no suffix extraction
         elif " (" in value and value.endswith(")"):
-            base_value, suffix = value.rsplit(" (", 1)
-            suffix = " (" + suffix
-            base_value = base_value.rstrip()
+            inner = value[value.index(" (") + 2:-1]
+            if "(" not in inner and ")" not in inner:
+                base_value, suffix = value.rsplit(" (", 1)
+                suffix = " (" + suffix
+                base_value = base_value.rstrip()
         if not base_value:
             continue
 

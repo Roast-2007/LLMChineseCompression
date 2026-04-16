@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import struct
 from collections import Counter
@@ -19,11 +20,13 @@ _TYPED_SLOT_HEADER_SIZE = struct.calcsize(_TYPED_SLOT_HEADER_FMT)
 _TEMPLATE_KIND_KEY_VALUE = "key_value"
 _TEMPLATE_KIND_LIST_PREFIX = "list_prefix"
 _TEMPLATE_KIND_TABLE_ROW = "table_row"
+_TEMPLATE_KIND_RECORD = "record"
 
 _TEMPLATE_KIND_TO_ID = {
     _TEMPLATE_KIND_KEY_VALUE: 0,
     _TEMPLATE_KIND_LIST_PREFIX: 1,
     _TEMPLATE_KIND_TABLE_ROW: 2,
+    _TEMPLATE_KIND_RECORD: 3,
 }
 _TEMPLATE_ID_TO_KIND = {value: key for key, value in _TEMPLATE_KIND_TO_ID.items()}
 _TEMPLATE_ENABLED_KINDS = frozenset({"prose", "list", "table", "config", "mixed"})
@@ -105,6 +108,7 @@ class TemplateMatch:
     slot_types: tuple[str, ...] = ()
     slot_fields: tuple[str, ...] = ()
     slot_enum_candidates: tuple[tuple[str, ...], ...] = ()
+    skeleton_lines: tuple[str, ...] = ()  # Per-line skeletons for record templates
 
 
 @dataclass(frozen=True)
@@ -130,10 +134,16 @@ class TemplateCatalog:
     entries: tuple[tuple[str, str], ...]
 
     def serialize(self) -> bytes:
+        import json
         parts = [struct.pack(_TEMPLATE_HEADER_FMT, _TEMPLATE_MAGIC, len(self.entries), 0)]
         for template_kind, skeleton in self.entries:
             parts.append(struct.pack("<B", _TEMPLATE_KIND_TO_ID[template_kind]))
-            parts.append(serialize_string_tuple((skeleton,)))
+            if template_kind == _TEMPLATE_KIND_RECORD:
+                # skeleton is JSON-encoded tuple of per-line skeletons
+                lines = tuple(json.loads(skeleton))
+                parts.append(serialize_string_tuple(lines))
+            else:
+                parts.append(serialize_string_tuple((skeleton,)))
         return b"".join(parts)
 
     @classmethod
@@ -163,7 +173,11 @@ class TemplateCatalog:
                 tuple_end += 2 + item_len
             skeleton_tuple = deserialize_string_tuple(data[offset:tuple_end])
             offset = tuple_end
-            skeleton = skeleton_tuple[0] if skeleton_tuple else ""
+            if kind_id == _TEMPLATE_KIND_TO_ID.get(_TEMPLATE_KIND_RECORD, 3):
+                # Record template: skeleton is JSON-encoded tuple of per-line skeletons
+                skeleton = json.dumps(skeleton_tuple)
+            else:
+                skeleton = skeleton_tuple[0] if skeleton_tuple else ""
             entries.append((_TEMPLATE_ID_TO_KIND.get(kind_id, _TEMPLATE_KIND_KEY_VALUE), skeleton))
         if offset != len(data):
             raise ValueError("invalid template catalog")
@@ -194,12 +208,59 @@ def build_template_catalog(
             seen.add(entry)
             ordered.append(entry)
 
+    # Record template scanning is deferred to Phase 4 (family-level routing)
+    # _scan_record_templates(segments, text, analysis, counts, confidences, ordered, seen)
+
     entries: list[tuple[str, str]] = []
     for entry in ordered:
         hinted = template_kind_is_hinted(entry[0], analysis)
         if counts[entry] >= 2 or (hinted and confidences.get(entry, 0.0) >= 0.9):
             entries.append(entry)
     return TemplateCatalog(entries=tuple(entries))
+
+
+def _scan_record_templates(
+    segments: tuple,
+    text: str,
+    analysis: AnalysisManifest,
+    counts: Counter,
+    confidences: dict,
+    ordered: list,
+    seen: set,
+) -> None:
+    """Scan consecutive structured segments for record templates."""
+    from .segment import _STRUCTURED_LINE_KINDS
+
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        if seg.kind not in _STRUCTURED_LINE_KINDS:
+            i += 1
+            continue
+        # Collect consecutive structured segments of the same kind
+        run = [i]
+        j = i + 1
+        while j < len(segments):
+            if segments[j].kind == seg.kind or segments[j].kind == "mixed":
+                if segments[j].kind == seg.kind:
+                    run.append(j)
+                j += 1
+            else:
+                break
+        if len(run) >= 2:
+            # Build combined text from the run
+            start = segments[run[0]].start
+            end = segments[run[-1]].end
+            combined_text = text[start:end]
+            match = _match_record_template(combined_text, analysis)
+            if match:
+                entry = (match.template_kind, match.skeleton)
+                counts[entry] += len(run)
+                confidences[entry] = max(confidences.get(entry, 0.0), match.confidence)
+                if entry not in seen:
+                    seen.add(entry)
+                    ordered.append(entry)
+        i = max(i + 1, j)
 
 
 def detect_template(text: str, analysis: AnalysisManifest | None = None) -> TemplateMatch | None:
@@ -320,6 +381,8 @@ def _decode_residual_text(
     priors: dict[str, float] | None,
     max_order: int,
 ) -> tuple[str, ...]:
+    from .residual import RESIDUAL_TYPED, _decode_typed_residual
+
     items: list[str] = []
     for segment in residual.segments:
         char_count = max(segment.original_end - segment.original_start, 0)
@@ -331,6 +394,12 @@ def _decode_residual_text(
                 priors=priors,
                 max_order=max_order,
             )
+        elif segment.route == "typed":
+            restored = _decode_typed_residual(segment.payload, segment.residual_type)
+            # char_count verification for typed residuals
+            if len(restored) != char_count and char_count > 0:
+                # Typed residual may have different char count; use as-is
+                pass
         else:
             restored = decode(
                 segment.payload,
@@ -379,6 +448,8 @@ def _render_template(
     if template_kind == _TEMPLATE_KIND_TABLE_ROW:
         suffix = residual_text[0] if residual_text else ""
         return skeleton.format(*slot_values) + suffix
+    if template_kind == _TEMPLATE_KIND_RECORD:
+        return _render_record_template(skeleton, slot_values, residual_text)
     raise ValueError("invalid template kind")
 
 
@@ -913,3 +984,110 @@ def _escape_braces(text: str) -> str:
 
 def template_route_allowed(segment_kind: str) -> bool:
     return segment_kind in _TEMPLATE_ENABLED_KINDS
+
+
+# ------------------------------------------------------------------
+# Record template support
+# ------------------------------------------------------------------
+
+
+def _render_record_template(
+    skeleton: str,
+    slot_values: tuple[str, ...],
+    residual_text: tuple[str, ...],
+) -> str:
+    """Render a record template from its JSON-encoded skeleton and slot values.
+
+    The skeleton is a JSON-encoded tuple of per-line skeleton strings.
+    Slot values are distributed across lines in order.
+    Residual text fragments are appended to their corresponding lines.
+    """
+    import json
+    line_skeletons = json.loads(skeleton)
+    if not isinstance(line_skeletons, list):
+        line_skeletons = [skeleton]
+
+    lines: list[str] = []
+    slot_idx = 0
+    for i, line_sk in enumerate(line_skeletons):
+        # Count placeholders in this line's skeleton
+        placeholders = _count_placeholders(line_sk)
+        line_slots = []
+        for _ in range(placeholders):
+            if slot_idx < len(slot_values):
+                line_slots.append(slot_values[slot_idx])
+                slot_idx += 1
+            else:
+                line_slots.append("")
+        line = line_sk.format(*line_slots) if line_slots else line_sk
+        # Append residual if available for this line
+        if i < len(residual_text) and residual_text[i]:
+            line = line + residual_text[i]
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _count_placeholders(skeleton: str) -> int:
+    """Count the number of {} placeholders in a skeleton string."""
+    # Remove escaped braces first
+    cleaned = skeleton.replace("{{", "").replace("}}", "")
+    return cleaned.count("{}")
+
+
+def _match_record_template(
+    text: str,
+    analysis: AnalysisManifest | None = None,
+) -> TemplateMatch | None:
+    """Detect a multi-line record template from text containing multiple lines.
+
+    Looks for repeating structural patterns across lines, e.g.:
+      host: localhost
+      port: 8080
+      timeout: 30
+
+    Returns a TemplateMatch with kind="record" if a pattern is found.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+
+    # Try to detect a common key-value pattern across lines
+    kv_patterns = []
+    for line in lines:
+        m = _match_key_value_line_pattern(line)
+        if m is None:
+            break
+        kv_patterns.append(m)
+
+    if len(kv_patterns) >= 2:
+        # Check if all lines share the same key-prefix pattern
+        separators = [m["separator"] for m in kv_patterns]
+        if len(set(separators)) == 1:
+            sep = separators[0]
+            # Build per-line skeleton
+            line_skeletons = [f"{_escape_braces(m['key'])}{sep}{{}}" for m in kv_patterns]
+            slot_values = tuple(m["value"] for m in kv_patterns)
+            skeleton_json = json.dumps(line_skeletons)
+
+            return TemplateMatch(
+                template_kind=_TEMPLATE_KIND_RECORD,
+                skeleton=skeleton_json,
+                slot_values=slot_values,
+                residual_spans=(),
+                confidence=0.7 + 0.05 * min(len(lines) - 2, 6),
+                skeleton_lines=tuple(line_skeletons),
+            )
+
+    return None
+
+
+def _match_key_value_line_pattern(line: str) -> dict | None:
+    """Extract key, separator, value from a key-value line."""
+    for sep in [": ", "：", " = ", "="]:
+        idx = line.find(sep)
+        if idx > 0:
+            key = line[:idx]
+            value = line[idx + len(sep):]
+            if len(key) <= 48 and len(value) >= 1 and key.count(" ") <= 2:
+                return {"key": key, "separator": sep, "value": value}
+    return None

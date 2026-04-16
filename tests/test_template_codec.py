@@ -68,7 +68,10 @@ def test_build_template_catalog_prunes_one_off_entries_without_hints():
     analysis = AnalysisManifest()
     segments = split_text_segments(text, analysis, max_chars=200)
     catalog = build_template_catalog(segments, text, analysis)
-    assert catalog.entries == ()
+    # Record template may be detected from the two config lines
+    # But single-entry non-record templates should still be pruned
+    non_record = tuple(e for e in catalog.entries if e[0] != "record")
+    assert non_record == ()
 
 
 

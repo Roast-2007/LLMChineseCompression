@@ -1,0 +1,47 @@
+## API 参考
+
+### GET /users
+
+获取用户列表。
+
+**参数：**
+- `page`: integer - 页码（默认: 1）
+- `limit`: integer - 每页数量（默认: 20）
+- `status`: string - 状态过滤（enabled, disabled, pending）
+- `sort`: string - 排序字段（created_at, updated_at, name）
+
+**响应：**
+- `code`: integer - 状态码（0 表示成功）
+- `data`: array - 用户列表
+- `message`: string - 提示信息
+
+**示例：**
+```
+GET /users?page=1&limit=10&status=enabled
+```
+
+### POST /users
+
+创建新用户。
+
+**参数：**
+- `name`: string - 用户名（必填）
+- `email`: string - 邮箱地址（必填）
+- `role`: string - 角色（admin, editor, viewer）
+- `active`: boolean - 是否激活（默认: true）
+
+**响应：**
+- `code`: integer - 状态码
+- `data`: object - 新建用户信息
+- `message`: string - 操作结果
+
+### DELETE /users/{id}
+
+删除指定用户。
+
+**参数：**
+- `id`: string - 用户唯一标识符（必填）
+
+**响应：**
+- `code`: integer - 状态码
+- `message`: string - 操作结果

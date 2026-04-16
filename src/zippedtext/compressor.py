@@ -61,7 +61,7 @@ from .online_manifest import (
 )
 from .predictor.llm import CHUNK_CHARS, MAX_TOKENS_DEFAULT
 from .router import route_segments
-from .segment import split_text_segments
+from .segment import split_text_segments, group_record_groups
 from .sideinfo_codec import make_section, section_stored_size
 from .template_codec import TemplateCatalog, build_template_catalog, decode_template_segment
 from .term_dictionary import build_structured_phrase_table
@@ -419,6 +419,7 @@ def structured_compress(
     phrase_set = frozenset(phrase_table.phrases)
     phrase_table_bytes = phrase_table.serialize() if phrase_table.phrases else b""
     segments = split_text_segments(text, analysis)
+    record_groups = group_record_groups(segments, text, analysis)
     template_catalog = build_template_catalog(segments, text, analysis)
     template_bytes = template_catalog.serialize() if template_catalog.entries else b""
     route_summary = route_segments(
@@ -431,6 +432,7 @@ def structured_compress(
         analysis=analysis,
         phrase_section_cost=len(phrase_table_bytes),
         template_section_cost=len(template_bytes),
+        record_groups=record_groups,
     )
     payload_parts: list[bytes] = []
     records: list[SegmentRecord] = []

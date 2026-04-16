@@ -1,0 +1,19 @@
+## 中英术语对照表
+
+| 中文 | English | 注释 |
+|------|---------|------|
+| 机器学习 | Machine Learning | 人工智能的核心分支 |
+| 深度学习 | Deep Learning | 基于神经网络的机器学习方法 |
+| 自然语言处理 | Natural Language Processing | NLP，处理人类语言的技术 |
+| 大语言模型 | Large Language Model | LLM，基于 Transformer 的模型 |
+| 注意力机制 | Attention Mechanism | 序列建模中的核心技术 |
+| 编码器 | Encoder | 将输入转换为表示的模块 |
+| 解码器 | Decoder | 将表示转换为输出的模块 |
+| 损失函数 | Loss Function | 衡量预测与真实值差异的函数 |
+| 梯度下降 | Gradient Descent | 最常用的优化算法 |
+| 过拟合 | Overfitting | 模型在训练集上表现过好 |
+| 正则化 | Regularization | 防止过拟合的技术 |
+| 迁移学习 | Transfer Learning | 将知识从一个任务迁移到另一个任务 |
+| 强化学习 | Reinforcement Learning | 通过与环境交互学习策略 |
+| 生成对抗网络 | Generative Adversarial Network | GAN，生成模型的一种 |
+| 卷积神经网络 | Convolutional Neural Network | CNN，主要用于图像处理 |

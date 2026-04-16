@@ -1,0 +1,36 @@
+# 更新日志
+
+## v0.3.5 — 2026-04-12
+- 修复 `_merge_priors` 浮点精度问题
+- 优化 `_count_phrase_occurrences` 性能
+- 新增 structured API 轻量预检
+- 代码质量与健壮性加固
+
+## v0.3.4 — 2026-04-10
+- 引入 schema-seeded typed slot codec
+- 支持 `identifier` / `version` / `path_or_url` 类型
+- 新增 `enum` / `number_with_unit` 槽位压缩
+- info / bench 新增 typed slot 可观测性
+
+## v0.3.3 — 2026-04-08
+- structured online 第二阶段优化
+- 引入 segment router
+- 新增 template codec 最小闭环
+- residual architecture 第一轮落地
+
+## v0.3.2 — 2026-04-05
+- 引入 structured online 主路径
+- 引入 `.ztxt` v3 section 化格式
+- 引入 LLM 辅助 term/phrase dictionary
+- 冻结 legacy online char/token
+
+## v0.3.1 — 2026-04-01
+- 在线模式性能优化
+- prediction cache 嵌入文件
+- CHUNK_CHARS 从 20 提升至 200
+
+## v0.3.0 — 2026-03-28
+- 中文字符频率先验
+- 短语级编码
+- 代码生成模式
+- 多平台 API 支持

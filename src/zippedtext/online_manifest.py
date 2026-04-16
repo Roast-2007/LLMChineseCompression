@@ -20,7 +20,7 @@ VALID_SLOT_TYPES = frozenset(
         "number_with_unit",
     }
 )
-VALID_TEMPLATE_KINDS = frozenset({"key_value", "list_prefix", "table_row"})
+VALID_TEMPLATE_KINDS = frozenset({"key_value", "list_prefix", "table_row", "record"})
 
 _KIND_TO_ID = {
     "prose": 0,

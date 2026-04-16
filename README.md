@@ -4,6 +4,8 @@ LLM 增强的无损中英文纯文本压缩工具。
 
 基于自适应 PPM（Prediction by Partial Matching）算法与算术编码，专为中文、英文和数字混合文本设计。在纯离线模式下已超越 gzip 和 zstd 的压缩率；预期在v0.5.0前后接入 LLM API 可进一步提升压缩率，当前仍在探索合适的llm深度嵌入方式。
 
+**v0.3.6 新增**：Record Family 扩展——新增 `RecordGroup` 数据结构实现连续结构化段落分组、`record` 模板 kind 支持多行记录模板（JSON-encoded per-line skeleton）、typed residual 新增 `RESIDUAL_TYPED` 路由支持 enum/version/path_or_url/number_with_unit/identifier 类型化残差编码、router 接受 `record_groups` 参数为族级收益优化奠基、新增 benchmark matrix 含 6 类结构化样本（API 文档/配置/更新日志/FAQ/双语术语/混合散文）。
+
 **v0.3.5 新增**：代码质量与健壮性加固——`_merge_priors` 浮点精度过滤修复、`_match_key_value` 嵌套括号安全处理、structured 路径前轻量启发式预检（小文本跳过 API 调用）、`probs_to_cdf` redistribution 极端情况兜底、`_looks_like_config` 行级模式检测修复、`router.py` 消除 `detect_template` 重复调用、`_count_all_phrase_occurrences` 单次全文扫描优化、内部函数重命名为公共 API（`get_priors` / `structured_compress`）。
 
 **v0.3.4 新增**：structured online 第三阶段聚焦 schema-seeded typed slot codec：analysis manifest 新增 `document_family` / `block_families` / `field_schemas` / `slot_hints` / `enum_candidates`，template slot 开始支持 `identifier` / `version` / `path_or_url` / `enum` / `number_with_unit`，`info` / `bench` 新增 typed slot 与 template family 可观测性，`bench` 现在同时展示 public structured 结果和 raw structured diagnostic。
@@ -326,10 +328,28 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] ~~schema-seeded typed slot codec~~ (v0.3.4)
 - [x] ~~bench / info / CLI 可观测性补强~~ (v0.3.4)
 - [x] ~~code quality + robustness hardening~~ (v0.3.5)
-- [ ] multi-line / record template family
-- [ ] document-level family clustering + global gain optimization
+- [x] ~~record family expansion~~ (v0.3.6)
+- [ ] document-level family clustering + global gain optimization 深化
 - [ ] 本地确定性模型
 - [ ] Rust 核心加速（PyO3）
+
+### v0.3.6 — record family expansion
+
+- 新增 `RecordGroup` 数据结构（`segment.py`）：`kind` / `segment_indices` / `family` / `text_span`
+- 新增 `group_record_groups()` 函数：连续同类型结构化段落聚类
+- `template_codec.py` 新增 `record` 模板 kind（ID: 3）
+- `TemplateMatch` 新增 `skeleton_lines` 字段支持多行骨架
+- `TemplateCatalog` 序列化/反序列化支持 record 模板的 JSON-encoded per-line skeleton
+- 新增 `_render_record_template()` 多行渲染逻辑
+- 新增 `_match_record_template()` 多行记录模板检测
+- 新增 `_scan_record_templates()` catalog 扫描（Phase 4 启用）
+- `residual.py` 新增 `RESIDUAL_TYPED = 3` 路由常量
+- `ResidualSegment` 新增 `residual_type` 字段
+- 新增 typed residual 编码/解码：enum / version / path_or_url / number_with_unit / identifier
+- `router.py` 接受 `record_groups` 参数，新增 `_evaluate_record_group_route()` 族级路由评估
+- 新增 `tests/test_segment.py`（10 个测试）
+- 新增 benchmark matrix：6 类结构化样本 + `bench.py` runner + `test_benchmark_matrix.py`
+- 154 个测试全部通过
 
 ### v0.3.5 — code quality + robustness hardening
 

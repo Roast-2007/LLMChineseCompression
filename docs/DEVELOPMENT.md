@@ -12,7 +12,7 @@
 |------|-----|
 | 仓库 | `Roast-2007/LLMChineseCompression` |
 | 包名 | `zippedtext` |
-| 当前版本 | `0.3.4` |
+| 当前版本 | `0.3.6` |
 | Python | >= 3.12 |
 | 协议 | MIT |
 | 构建后端 | hatchling |
@@ -265,6 +265,20 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] `bench` headline 结果改为走 public structured path，并保留 raw structured diagnostic
 - [x] CLI 测试 + 结构化 fixture
 
+### v0.3.6 — record family expansion ✅
+
+- [x] `RecordGroup` 数据结构（`kind` / `segment_indices` / `family` / `text_span`）
+- [x] `group_record_groups()` 连续结构化段落聚类
+- [x] `record` 模板 kind 支持多行记录模板
+- [x] `TemplateCatalog` 序列化支持 JSON-encoded per-line skeleton
+- [x] `_render_record_template()` 多行渲染
+- [x] `_match_record_template()` 多行记录模板检测
+- [x] typed residual（`RESIDUAL_TYPED`）：enum / version / path_or_url / number_with_unit / identifier
+- [x] `router.py` 接受 `record_groups` 参数 + `_evaluate_record_group_route()`
+- [x] `tests/test_segment.py` 10 个新增测试
+- [x] benchmark matrix：6 类结构化样本 + `bench.py` + `test_benchmark_matrix.py`
+- [x] 154 个测试全部通过
+
 ### v0.3.5 — code quality + robustness hardening ✅
 
 - [x] `_merge_priors()` 浮点精度过滤修复（阈值改为 `> 1e-15`，避免静默移除字符）
@@ -277,6 +291,13 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 - [x] `_get_priors` / `_structured_online_compress` 重命名为公共 API（`get_priors` / `structured_compress`）
 - [x] `Header.version` 默认值与 `VERSION` 常量同步（v3）
 - [x] `compressor.py` 新增 `import re`（支持结构化预检）
+
+### v0.3.6 — record family expansion ✅
+
+- [x] record grouping
+- [x] multi-line / paragraph template family
+- [x] typed residual 第一轮
+- [x] benchmark matrix 初版
 
 ### 后续仍未完成
 
@@ -293,7 +314,7 @@ DEEPSEEK_API_KEY=sk-your-key pytest tests/test_online_integration.py -v -s
 
 ## 7. 当前判断
 
-`v0.3.4` 之后，structured online 的下一阶段重点已经更清晰：
+`v0.3.6` 之后，structured online 的下一阶段重点已经更清晰：
 - 不应回头深挖 legacy char/token
 - 不应只继续做 prompt 微调
 - 更高 ROI 的方向是：

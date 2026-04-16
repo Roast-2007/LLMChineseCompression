@@ -1,0 +1,34 @@
+## 常见问题
+
+### 1. 什么是 LLMChineseCompression？
+
+LLMChineseCompression 是一个基于 LLM 增强的无损中英文纯文本压缩工具。它使用自适应 PPM 算法与算术编码，专为中文、英文和数字混合文本设计。
+
+### 2. 解压需要 API 吗？
+
+不需要。structured online 模式下，LLM 只参与编码期建模，解压期只依赖 `.ztxt` 文件内的结构化 side info 与本地确定性 coder。
+
+### 3. 支持哪些压缩模式？
+
+- **offline**（默认）：纯离线压缩，无需网络
+- **online structured**：LLM 辅助结构化分析
+- **online char/token**：旧版兼容模式
+- **codegen**：代码生成模式（实验性）
+
+### 4. 如何安装？
+
+```bash
+pip install zippedtext
+```
+
+### 5. 最低 Python 版本要求？
+
+Python 3.12 或更高版本。
+
+### 6. 压缩率如何对比 gzip/zstd？
+
+在纯离线模式下，对于中文技术文档，zippedtext 通常可以超越 gzip -9，接近 zstd -19 的压缩率。接入 LLM API 后可进一步提升。
+
+### 7. 是否支持二进制文件？
+
+不支持。当前设计专为 Unicode 纯文本优化。

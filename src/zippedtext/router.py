@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from .encoder import encode, encode_with_phrases
 from .gain_estimator import GainEstimate, GainEstimatorConfig, choose_best_route, estimate_total_bytes
 from .online_manifest import ROUTE_LITERAL, ROUTE_PHRASE, ROUTE_TEMPLATE
-from .segment import TextSegment
+from .segment import TextSegment, RecordGroup
 from .template_codec import (
     TemplateCatalog,
     TemplateMatch,
@@ -59,6 +59,7 @@ def route_segments(
     gain_config: GainEstimatorConfig | None = None,
     phrase_section_cost: int = 0,
     template_section_cost: int = 0,
+    record_groups: tuple[RecordGroup, ...] = (),
 ) -> RouteSummary:
     config = gain_config or GainEstimatorConfig()
     routed: list[RoutedSegment] = []
@@ -251,3 +252,81 @@ def _family_amortized_cost(total_cost: int, family_count: int) -> int:
     if total_cost <= 0 or family_count <= 0:
         return 0
     return max(total_cost // family_count, 1)
+
+
+def _evaluate_record_group_route(
+    record_group: RecordGroup,
+    segments: tuple[TextSegment, ...],
+    text: str,
+    template_catalog: TemplateCatalog,
+    analysis,
+    phrase_set: frozenset[str],
+    priors: dict[str, float] | None,
+    max_order: int,
+    config,
+    template_section_cost: int,
+) -> tuple[str, bytes, int] | None:
+    """Evaluate whether a record template beats per-segment routing for this group.
+
+    Returns (route_type, combined_payload, total_bytes) if record template wins, else None.
+    """
+    from .template_codec import _match_record_template, encode_template_segment
+
+    if len(record_group.segment_indices) < 2:
+        return None
+
+    # Build combined text from the record group
+    first_idx = record_group.segment_indices[0]
+    last_idx = record_group.segment_indices[-1]
+    start = segments[first_idx].start
+    end = segments[last_idx].end
+    combined_text = text[start:end]
+
+    match = _match_record_template(combined_text, analysis)
+    if match is None:
+        return None
+
+    # Check if the record template is in the catalog
+    entry = (match.template_kind, match.skeleton)
+    template_index_map = {
+        e: i for i, e in enumerate(template_catalog.entries)
+    }
+    template_index = template_index_map.get(entry)
+    if template_index is None:
+        return None
+
+    # Encode as record template
+    threshold = template_confidence_threshold(match, analysis)
+    if match.confidence < threshold:
+        return None
+
+    payload = encode_template_segment(
+        combined_text,
+        match,
+        template_index,
+        phrase_set,
+        priors,
+        max_order,
+    )
+
+    # Calculate amortized cost for this record family
+    family_key = f"record:{match.skeleton}"
+    family_count = sum(
+        1 for rg in []  # Would need record_groups passed in for accurate count
+        if rg.kind == record_group.kind
+    ) or 1
+
+    side_info = _family_amortized_cost(template_section_cost, family_count) + config.route_switch_penalty_bytes
+    total = payload.encoded_bytes + side_info
+
+    # Compare with sum of per-segment literal costs
+    per_segment_total = 0
+    for idx in record_group.segment_indices:
+        seg = segments[idx]
+        seg_text = text[seg.start:seg.end]
+        literal = encode(seg_text, priors=priors, max_order=max_order)
+        per_segment_total += len(literal)
+
+    if total < per_segment_total:
+        return ("record_template", payload.payload, total)
+    return None

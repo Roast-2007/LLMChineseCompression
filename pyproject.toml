@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zippedtext"
-version = "0.3.5"
+version = "0.3.6"
 description = "LLM-enhanced lossless text compression for Chinese/English/digits"
 readme = "README.md"
 license = "MIT"

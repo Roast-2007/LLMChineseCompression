@@ -1,0 +1,30 @@
+# Server Configuration
+host: 0.0.0.0
+port: 8080
+protocol: https
+timeout: 30s
+max_connections: 1000
+log_level: info
+log_format: json
+
+# Database Settings
+db_host: localhost
+db_port: 5432
+db_name: production
+db_pool_size: 20
+db_timeout: 10s
+db_ssl: true
+
+# Cache Configuration
+cache_backend: redis
+cache_host: 127.0.0.1
+cache_port: 6379
+cache_ttl: 300s
+cache_max_memory: 256MB
+
+# Security
+cors_enabled: true
+cors_origins: https://example.com
+rate_limit: 100/min
+auth_method: jwt
+jwt_expiry: 24h
